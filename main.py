@@ -140,7 +140,7 @@ def gerar_email(titulo, dominio):
 # ===== ENDPOINT =====
 @app.post("/processar")
 async def processar_csv(file: UploadFile = File(...)):
-    df_input = pd.read_csv(file.file)
+df_input = pd.read_csv(file.file, sep=None, engine="python")    
     dados_finais = []
 
     for _, row in df_input.iterrows():
