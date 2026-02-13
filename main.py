@@ -7,13 +7,11 @@ import dns.resolver
 from urllib.parse import urlparse
 
 # ====== CONFIG ======
-with open("config.json", "r") as f:
-    config = json.load(f)
+import os
 
-SERP_API_KEY = config["serpapi_key"]
-MAX_DECISORES = config["max_decisores_por_empresa"]
-SCORE_MINIMO = config["score_minimo_pronto"]
-
+SERP_API_KEY = os.getenv("SERPAPI_KEY")
+MAX_DECISORES = 3
+SCORE_MINIMO = 60
 
 # ====== UTILS ======
 def limpar_hostname(hostname):
