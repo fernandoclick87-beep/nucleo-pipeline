@@ -4,180 +4,105 @@ import requests
 import re
 import unicodedata
 import dns.resolver
-from urllib.parse import urlparse
+
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import StreamingResponse
-import io
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-SERP_API_KEY = os.getenv("SERPAPI_KEY")
-MAX_DECISORES = 3
-SCORE_MINIMO = 60
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
+# ==============================
+# UTILIDADES
+# ==============================
 
-# ===== UTILS =====
-def limpar_hostname(hostname):
-    if not hostname:
+def limpar_texto(texto):
+    if not texto:
         return ""
-    h = hostname.strip().lower()
-    if h.startswith("www."):
-        h = h[4:]
-    return h
+    texto = unicodedata.normalize("NFKD", str(texto))
+    texto = texto.encode("ascii", "ignore").decode("utf-8")
+    return texto.strip()
 
 
-def limpar_nome(nome):
-    nome = unicodedata.normalize("NFKD", nome)
-    nome = "".join([c for c in nome if not unicodedata.combining(c)])
-    nome = re.sub(r"[^A-Za-z\s]", "", nome)
-    return nome.lower().strip()
-
-
-def verificar_mx(dominio):
+def validar_mx(dominio):
     try:
-        dns.resolver.resolve(dominio, 'MX')
+        registros = dns.resolver.resolve(dominio, 'MX')
         return True
     except:
         return False
 
 
-# ===== COLETA =====
-def buscar_cnpj(cnpj):
-    try:
-        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        telefone = data.get("ddd_telefone_1", "")
-        endereco = f'{data.get("logradouro", "")}, {data.get("numero", "")} - {data.get("municipio", "")}/{data.get("uf", "")}'
-        return telefone, endereco
-    except:
-        return "", ""
+def buscar_linkedin_empresa(nome_empresa):
+    if not SERPAPI_KEY:
+        return None
 
+    query = f"{nome_empresa} LinkedIn"
+    url = "https://serpapi.com/search"
 
-def buscar_dominio(nome_empresa):
-    query = f'"{nome_empresa}" site oficial'
     params = {
         "engine": "google",
         "q": query,
-        "api_key": SERP_API_KEY,
-        "num": 3
+        "api_key": SERPAPI_KEY
     }
+
     try:
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get(url, params=params)
         data = response.json()
+
         if "organic_results" in data:
-            for item in data["organic_results"]:
-                link = item.get("link", "")
-                host = urlparse(link).netloc
-                host = limpar_hostname(host)
-                if host:
-                    return host
-        return ""
+            for resultado in data["organic_results"]:
+                link = resultado.get("link", "")
+                if "linkedin.com/company" in link:
+                    return link
+
+        return None
+
     except:
-        return ""
+        return None
 
 
-def buscar_decisores(nome_empresa):
-    query = f'site:linkedin.com/in "{nome_empresa}" ("Diretor" OR "Head" OR "Gerente" OR "Sustentabilidade" OR "ESG" OR "Institucional" OR "Financeiro")'
-    params = {
-        "engine": "google",
-        "q": query,
-        "api_key": SERP_API_KEY,
-        "num": MAX_DECISORES
-    }
-    try:
-        response = requests.get("https://serpapi.com/search", params=params)
-        data = response.json()
-        resultados = []
-        if "organic_results" in data:
-            for item in data["organic_results"]:
-                resultados.append({
-                    "titulo": item.get("title", ""),
-                    "linkedin": item.get("link", "")
-                })
-        return resultados
-    except:
-        return []
+# ==============================
+# ENDPOINT PRINCIPAL
+# ==============================
 
-
-def calcular_score(titulo):
-    score = 0
-    t = titulo.lower()
-
-    if "diretor" in t:
-        score += 40
-    if "head" in t:
-        score += 35
-    if "gerente" in t:
-        score += 25
-    if "sustentabilidade" in t or "esg" in t:
-        score += 30
-    if "marketing" in t:
-        score += 25
-    if "institucional" in t:
-        score += 20
-    if "financeiro" in t:
-        score += 20
-
-    return score
-
-
-def gerar_email(titulo, dominio):
-    if not titulo or not dominio:
-        return ""
-
-    nome = titulo.split(" - ")[0]
-    nome = limpar_nome(nome)
-    partes = nome.split()
-
-    if len(partes) >= 2:
-        return f"{partes[0]}.{partes[-1]}@{dominio}"
-    elif len(partes) == 1:
-        return f"{partes[0]}@{dominio}"
-    return ""
-
-
-# ===== ENDPOINT =====
 @app.post("/processar")
 async def processar_csv(file: UploadFile = File(...)):
-df_input = pd.read_csv(file.file, sep=None, engine="python")    
-    dados_finais = []
+
+    try:
+        df_input = pd.read_csv(file.file, sep=None, engine="python")
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"erro": f"Erro ao ler CSV: {str(e)}"}
+        )
+
+    resultados = []
 
     for _, row in df_input.iterrows():
-        empresa = row["empresa"]
-        cnpj = str(row["cnpj"])
 
-        telefone, endereco = buscar_cnpj(cnpj)
-        dominio = buscar_dominio(empresa)
-        dominio_mx = verificar_mx(dominio) if dominio else False
-        decisores = buscar_decisores(empresa)
+        empresa = limpar_texto(row.get("empresa", ""))
+        cnpj = str(row.get("cnpj", ""))
+        uf = row.get("uf", "")
 
-        for d in decisores:
-            score = calcular_score(d["titulo"])
-            email = gerar_email(d["titulo"], dominio)
+        linkedin = buscar_linkedin_empresa(empresa)
 
-            status = "PRONTO" if dominio_mx and score >= SCORE_MINIMO else "REVISAR"
+        dominio_oficial = None
+        dominio_tem_mx = False
 
-            dados_finais.append({
-                "Empresa": empresa,
-                "Telefone_Matriz": telefone,
-                "Dominio": dominio,
-                "Dominio_Tem_MX": dominio_mx,
-                "Decisor": d["titulo"],
-                "Score": score,
-                "Email_Previsto": email,
-                "Status": status,
-                "LinkedIn": d["linkedin"]
-            })
+        if linkedin:
+            dominio_oficial = linkedin.split("/")[-1]
+            dominio_tem_mx = validar_mx(dominio_oficial)
 
-    df_output = pd.DataFrame(dados_finais)
+        resultados.append({
+            "empresa": empresa,
+            "cnpj": cnpj,
+            "uf": uf,
+            "linkedin_empresa": linkedin,
+            "dominio_oficial": dominio_oficial,
+            "dominio_tem_mx": dominio_tem_mx
+        })
 
-    output = io.StringIO()
-    df_output.to_csv(output, index=False)
-    output.seek(0)
-
-    return StreamingResponse(
-        output,
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=resultado.csv"}
-    )
+    return {
+        "total_processado": len(resultados),
+        "dados": resultados
+    }
