@@ -1,19 +1,22 @@
+import os
 import pandas as pd
-import json
 import requests
 import re
 import unicodedata
 import dns.resolver
 from urllib.parse import urlparse
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import StreamingResponse
+import io
 
-# ====== CONFIG ======
-import os
+app = FastAPI()
 
 SERP_API_KEY = os.getenv("SERPAPI_KEY")
 MAX_DECISORES = 3
 SCORE_MINIMO = 60
 
-# ====== UTILS ======
+
+# ===== UTILS =====
 def limpar_hostname(hostname):
     if not hostname:
         return ""
@@ -38,7 +41,7 @@ def verificar_mx(dominio):
         return False
 
 
-# ====== COLETA ======
+# ===== COLETA =====
 def buscar_cnpj(cnpj):
     try:
         url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
@@ -97,7 +100,6 @@ def buscar_decisores(nome_empresa):
         return []
 
 
-# ====== SCORE ======
 def calcular_score(titulo):
     score = 0
     t = titulo.lower()
@@ -135,16 +137,15 @@ def gerar_email(titulo, dominio):
     return ""
 
 
-# ====== MAIN ======
-def run_pipeline():
-    df_input = pd.read_csv("input.csv")
+# ===== ENDPOINT =====
+@app.post("/processar")
+async def processar_csv(file: UploadFile = File(...)):
+    df_input = pd.read_csv(file.file)
     dados_finais = []
 
     for _, row in df_input.iterrows():
         empresa = row["empresa"]
         cnpj = str(row["cnpj"])
-
-        print(f"Processando: {empresa}")
 
         telefone, endereco = buscar_cnpj(cnpj)
         dominio = buscar_dominio(empresa)
@@ -170,10 +171,13 @@ def run_pipeline():
             })
 
     df_output = pd.DataFrame(dados_finais)
-    df_output.to_csv("output.csv", index=False)
 
-    print("Pipeline finalizado.")
+    output = io.StringIO()
+    df_output.to_csv(output, index=False)
+    output.seek(0)
 
-
-if __name__ == "__main__":
-    run_pipeline()
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=resultado.csv"}
+    )
