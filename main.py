@@ -30,9 +30,9 @@ def normalizar_coluna(nome: str) -> str:
 def mapear_colunas(df):
     MAPA_EMPRESA = {"organizacao", "razao_social", "razao", "empresa", "nome_empresa", "nome"}
     MAPA_CNPJ    = {"cnpj", "documento", "doc", "nr_cnpj", "num_cnpj"}
-    df.columns = [normalizar_coluna(c) for c in df.columns]
-    col_empresa = next((c for c in df.columns if c in MAPA_EMPRESA), None)
-    col_cnpj    = next((c for c in df.columns if c in MAPA_CNPJ), None)
+    df.columns   = [normalizar_coluna(c) for c in df.columns]
+    col_empresa  = next((c for c in df.columns if c in MAPA_EMPRESA), None)
+    col_cnpj     = next((c for c in df.columns if c in MAPA_CNPJ), None)
     if not col_empresa or not col_cnpj:
         return None, "CSV precisa conter colunas compatíveis com empresa e cnpj"
     return df.rename(columns={col_empresa: "empresa", col_cnpj: "cnpj"}), None
@@ -46,12 +46,19 @@ def validar_mx(dominio):
     except:
         return False
 
+def nome_simples(nome_empresa: str) -> str:
+    """Extrai palavra principal da empresa para validação de pertinência."""
+    ignorar = {"sa", "s/a", "ltda", "ltda.", "s.a", "s.a.", "do", "de", "da",
+               "brasil", "brasileira", "grupo", "cia", "companhia", "industria"}
+    partes = limpar_texto(nome_empresa).lower().split()
+    principais = [p for p in partes if p not in ignorar and len(p) > 3]
+    return principais[0] if principais else partes[0] if partes else ""
+
 # ==============================
 # BRASILAPI — GRÁTIS
 # ==============================
 
 def buscar_dados_cnpj(cnpj: str):
-    """Busca telefone, endereço e UF direto na Receita Federal via BrasilAPI."""
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     try:
         r = requests.get(
@@ -60,25 +67,24 @@ def buscar_dados_cnpj(cnpj: str):
         )
         if r.status_code == 200:
             d = r.json()
-            telefone = d.get("ddd_telefone_1", "")
+            telefone   = d.get("ddd_telefone_1", "")
             if telefone:
-                telefone = re.sub(r"\D", "", telefone)
-                if len(telefone) >= 10:
-                    telefone = f"({telefone[:2]}) {telefone[2:]}"
-            logradouro  = d.get("logradouro", "")
-            numero      = d.get("numero", "")
-            bairro      = d.get("bairro", "")
-            municipio   = d.get("municipio", "")
-            uf          = d.get("uf", "")
-            cep         = d.get("cep", "")
-            endereco = f"{logradouro}, {numero} - {bairro}, {municipio}/{uf} - CEP {cep}"
+                t = re.sub(r"\D", "", telefone)
+                telefone = f"({t[:2]}) {t[2:]}" if len(t) >= 10 else t
+            logradouro = d.get("logradouro", "")
+            numero     = d.get("numero", "")
+            bairro     = d.get("bairro", "")
+            municipio  = d.get("municipio", "")
+            uf         = d.get("uf", "")
+            cep        = d.get("cep", "")
+            endereco   = f"{logradouro}, {numero} - {bairro}, {municipio}/{uf} - CEP {cep}"
             return telefone.strip(), endereco.strip(), uf.strip()
     except:
         pass
     return "", "", ""
 
 # ==============================
-# SERPAPI — 1 CRÉDITO POR BUSCA
+# SERPAPI — 2 CRÉDITOS POR EMPRESA
 # ==============================
 
 def serpapi_search(query):
@@ -95,44 +101,83 @@ def serpapi_search(query):
     except:
         return []
 
-def buscar_linkedin_empresa(nome_empresa):
-    for r in serpapi_search(f"{nome_empresa} site:linkedin.com/company"):
-        link = r.get("link", "")
-        if "linkedin.com/company" in link:
-            return link
-    return None
+def buscar_linkedin_e_dominio(nome_empresa):
+    """
+    1 crédito: busca LinkedIn da empresa e deriva o domínio real do site oficial.
+    Valida que o resultado pertence à empresa checando o nome no link/snippet.
+    """
+    chave = nome_simples(nome_empresa)
+    linkedin_empresa = None
+    dominio_oficial  = None
 
-def buscar_dominio_real(nome_empresa, cnpj):
-    ignorar = ["linkedin", "facebook", "instagram", "receitafederal",
-               "cnpj.info", "empresas.net", "econodata", "jusbrasil",
-               "tabelasalarios", "wikipedia", "google", "brasilapi"]
-    for r in serpapi_search(f"{nome_empresa} CNPJ {cnpj} site oficial"):
-        link = r.get("link", "")
-        if not link or any(i in link.lower() for i in ignorar):
-            continue
-        match = re.search(r"https?://(?:www\.)?([^/]+)", link)
-        if match:
-            return match.group(1)
-    return None
+    ignorar_dominio = ["linkedin", "facebook", "instagram", "receitafederal",
+                       "cnpj.info", "empresas.net", "econodata", "jusbrasil",
+                       "tabelasalarios", "wikipedia", "google", "brasilapi",
+                       "glassdoor", "indeed", "catho", "infojobs"]
+
+    resultados = serpapi_search(f"{nome_empresa} LinkedIn empresa site oficial")
+
+    for r in resultados:
+        link    = r.get("link", "")
+        titulo  = r.get("title", "").lower()
+        snippet = r.get("snippet", "").lower()
+        contexto = titulo + " " + snippet
+
+        # LinkedIn da empresa — valida que o nome da empresa aparece no contexto
+        if not linkedin_empresa and "linkedin.com/company" in link:
+            if chave in contexto or chave in link.lower():
+                linkedin_empresa = link
+
+        # Domínio oficial — primeiro resultado que não seja rede social ou agregador
+        if not dominio_oficial and link:
+            if not any(i in link.lower() for i in ignorar_dominio):
+                match = re.search(r"https?://(?:www\.)?([^/]+)", link)
+                if match:
+                    dominio_oficial = match.group(1)
+
+        if linkedin_empresa and dominio_oficial:
+            break
+
+    return linkedin_empresa, dominio_oficial
 
 def buscar_decisor(nome_empresa):
-    cargos = ["ESG", "Sustentabilidade", "Marketing", "Financeiro", "Diretoria"]
-    for cargo in cargos:
-        for r in serpapi_search(f"{nome_empresa} {cargo} site:linkedin.com/in"):
-            link    = r.get("link", "")
-            titulo  = r.get("title", "")
-            snippet = r.get("snippet", "")
-            if "linkedin.com/in" in link:
-                nome_decisor  = titulo.split(" - ")[0].strip() if " - " in titulo else titulo.strip()
-                cargo_decisor = snippet[:120] if snippet else cargo
-                return nome_decisor, cargo_decisor, link
+    """
+    1 crédito: busca decisor ESG/Marketing/Financeiro no LinkedIn.
+    Valida que o resultado pertence à empresa.
+    """
+    chave  = nome_simples(nome_empresa)
+    cargos = "ESG OR Sustentabilidade OR Marketing OR Financeiro OR Diretoria"
+    query  = f"{nome_empresa} {cargos} site:linkedin.com/in"
+
+    for r in serpapi_search(query):
+        link    = r.get("link", "")
+        titulo  = r.get("title", "")
+        snippet = r.get("snippet", "").lower()
+
+        if "linkedin.com/in" not in link:
+            continue
+
+        # Valida que o snippet menciona a empresa
+        if chave not in snippet:
+            continue
+
+        # Extrai nome limpo — ignora se vier incompleto (ex: "Osmar C.")
+        nome_bruto = titulo.split(" - ")[0].strip() if " - " in titulo else titulo.strip()
+        partes = nome_bruto.split()
+        if len(partes) < 2 or any(len(p) <= 2 for p in partes):
+            continue  # nome incompleto, pula
+
+        cargo_decisor = snippet[:120] if snippet else ""
+        return nome_bruto, cargo_decisor, link
+
     return None, None, None
 
 def gerar_email_provavel(nome_decisor, dominio):
     if not nome_decisor or not dominio:
         return None
     partes = limpar_texto(nome_decisor).lower().split()
-    if len(partes) < 2:
+    # Só gera se tiver nome e sobrenome completos (sem iniciais)
+    if len(partes) < 2 or any(len(p) <= 2 for p in [partes[0], partes[-1]]):
         return None
     return f"{partes[0]}.{partes[-1]}@{dominio}"
 
@@ -157,23 +202,18 @@ async def processar_csv(file: UploadFile = File(...)):
         empresa = limpar_texto(row.get("empresa", ""))
         cnpj    = str(row.get("cnpj", "")).strip()
 
-        # GRÁTIS — BrasilAPI
+        # GRÁTIS
         telefone, endereco, uf = buscar_dados_cnpj(cnpj)
 
-        # 1 crédito — LinkedIn empresa
-        linkedin_empresa = buscar_linkedin_empresa(empresa)
+        # 1 crédito
+        linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(empresa)
+        dominio_tem_mx = validar_mx(dominio_oficial)
 
-        # 1 crédito — Domínio real
-        dominio_oficial = buscar_dominio_real(empresa, cnpj)
-        dominio_tem_mx  = validar_mx(dominio_oficial)
-
-        # 1 crédito — Decisor
+        # 1 crédito
         nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor(empresa)
 
-        # Grátis — Email gerado
-        email_previsto = None
-        if dominio_tem_mx:
-            email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial)
+        # GRÁTIS
+        email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial) if dominio_tem_mx else None
 
         resultados.append({
             "empresa":          empresa,
@@ -181,9 +221,9 @@ async def processar_csv(file: UploadFile = File(...)):
             "uf":               uf,
             "telefone_sede":    telefone,
             "endereco_sede":    endereco,
-            "dominio_oficial":  dominio_oficial,
+            "dominio_oficial":  dominio_oficial  or "",
             "dominio_tem_mx":   dominio_tem_mx,
-            "linkedin_empresa": linkedin_empresa,
+            "linkedin_empresa": linkedin_empresa or "",
             "decisor_nome":     nome_decisor     or "",
             "decisor_cargo":    cargo_decisor    or "",
             "decisor_linkedin": linkedin_decisor or "",
