@@ -9,7 +9,8 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 
 app = FastAPI()
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+SERPAPI_KEY    = os.getenv("SERPAPI_KEY")
+ZEROBOUNCE_KEY = os.getenv("ZEROBOUNCE_KEY")
 
 # ==============================
 # UTILIDADES
@@ -47,7 +48,6 @@ def validar_mx(dominio):
         return False
 
 def nome_simples(nome_empresa: str) -> str:
-    """Extrai palavra principal da empresa para validação de pertinência."""
     ignorar = {"sa", "s/a", "ltda", "ltda.", "s.a", "s.a.", "do", "de", "da",
                "brasil", "brasileira", "grupo", "cia", "companhia", "industria"}
     partes = limpar_texto(nome_empresa).lower().split()
@@ -67,21 +67,42 @@ def buscar_dados_cnpj(cnpj: str):
         )
         if r.status_code == 200:
             d = r.json()
-            telefone   = d.get("ddd_telefone_1", "")
+            telefone  = d.get("ddd_telefone_1", "")
             if telefone:
                 t = re.sub(r"\D", "", telefone)
                 telefone = f"({t[:2]}) {t[2:]}" if len(t) >= 10 else t
-            logradouro = d.get("logradouro", "")
-            numero     = d.get("numero", "")
-            bairro     = d.get("bairro", "")
-            municipio  = d.get("municipio", "")
-            uf         = d.get("uf", "")
-            cep        = d.get("cep", "")
-            endereco   = f"{logradouro}, {numero} - {bairro}, {municipio}/{uf} - CEP {cep}"
-            return telefone.strip(), endereco.strip(), uf.strip()
+            endereco = (f"{d.get('logradouro','')},"
+                        f" {d.get('numero','')} -"
+                        f" {d.get('bairro','')},"
+                        f" {d.get('municipio','')}/{d.get('uf','')} -"
+                        f" CEP {d.get('cep','')}")
+            return telefone.strip(), endereco.strip(), d.get("uf", "")
     except:
         pass
     return "", "", ""
+
+# ==============================
+# ZEROBOUNCE — VERIFICAÇÃO DE EMAIL
+# ==============================
+
+def verificar_email(email: str) -> str:
+    """
+    Retorna: valid | invalid | catch-all | unknown | spamtrap | abuse | do_not_mail
+    Consome 1 crédito ZeroBounce por verificação bem-sucedida.
+    """
+    if not ZEROBOUNCE_KEY or not email:
+        return "não verificado"
+    try:
+        r = requests.get(
+            "https://api.zerobounce.net/v2/validate",
+            params={"api_key": ZEROBOUNCE_KEY, "email": email, "ip_address": ""},
+            timeout=10
+        )
+        if r.status_code == 200:
+            return r.json().get("status", "unknown")
+    except:
+        pass
+    return "unknown"
 
 # ==============================
 # SERPAPI — 2 CRÉDITOS POR EMPRESA
@@ -102,10 +123,6 @@ def serpapi_search(query):
         return []
 
 def buscar_linkedin_e_dominio(nome_empresa):
-    """
-    1 crédito: busca LinkedIn da empresa e deriva o domínio real do site oficial.
-    Valida que o resultado pertence à empresa checando o nome no link/snippet.
-    """
     chave = nome_simples(nome_empresa)
     linkedin_empresa = None
     dominio_oficial  = None
@@ -115,20 +132,14 @@ def buscar_linkedin_e_dominio(nome_empresa):
                        "tabelasalarios", "wikipedia", "google", "brasilapi",
                        "glassdoor", "indeed", "catho", "infojobs"]
 
-    resultados = serpapi_search(f"{nome_empresa} LinkedIn empresa site oficial")
+    for r in serpapi_search(f"{nome_empresa} LinkedIn empresa site oficial"):
+        link     = r.get("link", "")
+        contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
 
-    for r in resultados:
-        link    = r.get("link", "")
-        titulo  = r.get("title", "").lower()
-        snippet = r.get("snippet", "").lower()
-        contexto = titulo + " " + snippet
-
-        # LinkedIn da empresa — valida que o nome da empresa aparece no contexto
         if not linkedin_empresa and "linkedin.com/company" in link:
             if chave in contexto or chave in link.lower():
                 linkedin_empresa = link
 
-        # Domínio oficial — primeiro resultado que não seja rede social ou agregador
         if not dominio_oficial and link:
             if not any(i in link.lower() for i in ignorar_dominio):
                 match = re.search(r"https?://(?:www\.)?([^/]+)", link)
@@ -141,34 +152,25 @@ def buscar_linkedin_e_dominio(nome_empresa):
     return linkedin_empresa, dominio_oficial
 
 def buscar_decisor(nome_empresa):
-    """
-    1 crédito: busca decisor ESG/Marketing/Financeiro no LinkedIn.
-    Valida que o resultado pertence à empresa.
-    """
     chave  = nome_simples(nome_empresa)
     cargos = "ESG OR Sustentabilidade OR Marketing OR Financeiro OR Diretoria"
-    query  = f"{nome_empresa} {cargos} site:linkedin.com/in"
 
-    for r in serpapi_search(query):
+    for r in serpapi_search(f"{nome_empresa} {cargos} site:linkedin.com/in"):
         link    = r.get("link", "")
         titulo  = r.get("title", "")
         snippet = r.get("snippet", "").lower()
 
         if "linkedin.com/in" not in link:
             continue
-
-        # Valida que o snippet menciona a empresa
         if chave not in snippet:
             continue
 
-        # Extrai nome limpo — ignora se vier incompleto (ex: "Osmar C.")
         nome_bruto = titulo.split(" - ")[0].strip() if " - " in titulo else titulo.strip()
         partes = nome_bruto.split()
-        if len(partes) < 2 or any(len(p) <= 2 for p in partes):
-            continue  # nome incompleto, pula
+        if len(partes) < 2 or any(len(p) <= 2 for p in [partes[0], partes[-1]]):
+            continue
 
-        cargo_decisor = snippet[:120] if snippet else ""
-        return nome_bruto, cargo_decisor, link
+        return nome_bruto, snippet[:120], link
 
     return None, None, None
 
@@ -176,7 +178,6 @@ def gerar_email_provavel(nome_decisor, dominio):
     if not nome_decisor or not dominio:
         return None
     partes = limpar_texto(nome_decisor).lower().split()
-    # Só gera se tiver nome e sobrenome completos (sem iniciais)
     if len(partes) < 2 or any(len(p) <= 2 for p in [partes[0], partes[-1]]):
         return None
     return f"{partes[0]}.{partes[-1]}@{dominio}"
@@ -205,15 +206,18 @@ async def processar_csv(file: UploadFile = File(...)):
         # GRÁTIS
         telefone, endereco, uf = buscar_dados_cnpj(cnpj)
 
-        # 1 crédito
+        # 1 crédito SerpAPI
         linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(empresa)
         dominio_tem_mx = validar_mx(dominio_oficial)
 
-        # 1 crédito
+        # 1 crédito SerpAPI
         nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor(empresa)
 
-        # GRÁTIS
+        # GRÁTIS — gerado
         email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial) if dominio_tem_mx else None
+
+        # 1 crédito ZeroBounce — só verifica se gerou email
+        email_status = verificar_email(email_previsto) if email_previsto else "sem email"
 
         resultados.append({
             "empresa":          empresa,
@@ -228,6 +232,7 @@ async def processar_csv(file: UploadFile = File(...)):
             "decisor_cargo":    cargo_decisor    or "",
             "decisor_linkedin": linkedin_decisor or "",
             "email_previsto":   email_previsto   or "",
+            "email_status":     email_status,
         })
 
     df_final = pd.DataFrame(resultados)
