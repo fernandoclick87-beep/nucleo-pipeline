@@ -1,15 +1,18 @@
 import os
-import pandas as pd
-import requests
+import io
 import re
 import unicodedata
+import pandas as pd
+import requests
 import dns.resolver
+
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 
 app = FastAPI()
 
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+
 
 # ==============================
 # UTILIDADES
@@ -25,31 +28,17 @@ def limpar_texto(texto):
 
 def validar_mx(dominio):
     try:
-        registros = dns.resolver.resolve(dominio, 'MX')
+        dns.resolver.resolve(dominio, 'MX')
         return True
     except:
         return False
-
-
-def extrair_slug_linkedin(link):
-    if not link:
-        return None
-    partes = link.split("/")
-    if "company" in partes:
-        idx = partes.index("company")
-        if idx + 1 < len(partes):
-            slug = partes[idx + 1]
-            slug = slug.replace("?trk=public_post_main-feed-card-text", "")
-            slug = slug.replace("jobs", "")
-            return slug
-    return None
 
 
 def buscar_linkedin_empresa(nome_empresa):
     if not SERPAPI_KEY:
         return None
 
-    query = f"{nome_empresa} site:linkedin.com/company"
+    query = f"{nome_empresa} LinkedIn"
     url = "https://serpapi.com/search"
 
     params = {
@@ -74,58 +63,6 @@ def buscar_linkedin_empresa(nome_empresa):
         return None
 
 
-def buscar_decisores(nome_empresa):
-    if not SERPAPI_KEY:
-        return []
-
-    query = f'{nome_empresa} ("ESG" OR "Sustentabilidade" OR "Marketing" OR "Financeiro") site:linkedin.com/in'
-    url = "https://serpapi.com/search"
-
-    params = {
-        "engine": "google",
-        "q": query,
-        "api_key": SERPAPI_KEY,
-        "num": 5
-    }
-
-    try:
-        response = requests.get(url, params=params)
-        data = response.json()
-
-        decisores = []
-
-        if "organic_results" in data:
-            for resultado in data["organic_results"]:
-                titulo = resultado.get("title", "")
-                link = resultado.get("link", "")
-
-                if "linkedin.com/in" in link:
-                    decisores.append({
-                        "nome_cargo": titulo,
-                        "linkedin": link
-                    })
-
-        return decisores
-
-    except:
-        return []
-
-
-def gerar_email_provavel(nome_decisor, dominio):
-    if not dominio:
-        return None
-
-    nome_limpo = limpar_texto(nome_decisor)
-    partes = nome_limpo.split(" ")
-
-    if len(partes) >= 2:
-        primeiro = partes[0].lower()
-        ultimo = partes[-1].lower()
-        return f"{primeiro}.{ultimo}@{dominio}"
-
-    return None
-
-
 # ==============================
 # ENDPOINT PRINCIPAL
 # ==============================
@@ -147,42 +84,39 @@ async def processar_csv(file: UploadFile = File(...)):
 
         empresa = limpar_texto(row.get("empresa", ""))
         cnpj = str(row.get("cnpj", ""))
+        uf = row.get("uf", "")
 
-        linkedin_empresa = buscar_linkedin_empresa(empresa)
-        slug = extrair_slug_linkedin(linkedin_empresa)
+        linkedin = buscar_linkedin_empresa(empresa)
 
-        dominio_oficial = slug
-        dominio_tem_mx = validar_mx(dominio_oficial) if dominio_oficial else False
+        dominio_oficial = None
+        dominio_tem_mx = False
 
-        decisores = buscar_decisores(empresa)
+        if linkedin:
+            dominio_oficial = linkedin.split("/")[-1]
+            dominio_tem_mx = validar_mx(dominio_oficial)
 
-        if not decisores:
-            resultados.append({
-                "empresa": empresa,
-                "cnpj": cnpj,
-                "linkedin_empresa": linkedin_empresa,
-                "dominio_oficial": dominio_oficial,
-                "dominio_tem_mx": dominio_tem_mx,
-                "decisor_nome_cargo": None,
-                "decisor_linkedin": None,
-                "email_provavel": None
-            })
-        else:
-            for d in decisores:
-                email_provavel = gerar_email_provavel(d["nome_cargo"], dominio_oficial)
+        resultados.append({
+            "empresa": empresa,
+            "cnpj": cnpj,
+            "uf": uf,
+            "linkedin_empresa": linkedin,
+            "dominio_oficial": dominio_oficial,
+            "dominio_tem_mx": dominio_tem_mx
+        })
 
-                resultados.append({
-                    "empresa": empresa,
-                    "cnpj": cnpj,
-                    "linkedin_empresa": linkedin_empresa,
-                    "dominio_oficial": dominio_oficial,
-                    "dominio_tem_mx": dominio_tem_mx,
-                    "decisor_nome_cargo": d["nome_cargo"],
-                    "decisor_linkedin": d["linkedin"],
-                    "email_provavel": email_provavel
-                })
+    # Converte resultado em DataFrame
+    df_final = pd.DataFrame(resultados)
 
-    return {
-        "total_processado": len(resultados),
-        "dados": resultados
-    }
+    # Gera CSV em memória
+    output = io.StringIO()
+    df_final.to_csv(output, index=False)
+    output.seek(0)
+
+    # Retorna CSV para download automático
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=resultado_pipeline.csv"
+        }
+    )
