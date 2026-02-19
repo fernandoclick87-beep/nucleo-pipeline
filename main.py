@@ -30,14 +30,11 @@ def normalizar_coluna(nome: str) -> str:
 def mapear_colunas(df):
     MAPA_EMPRESA = {"organizacao", "razao_social", "razao", "empresa", "nome_empresa", "nome"}
     MAPA_CNPJ    = {"cnpj", "documento", "doc", "nr_cnpj", "num_cnpj"}
-
     df.columns = [normalizar_coluna(c) for c in df.columns]
     col_empresa = next((c for c in df.columns if c in MAPA_EMPRESA), None)
     col_cnpj    = next((c for c in df.columns if c in MAPA_CNPJ), None)
-
     if not col_empresa or not col_cnpj:
         return None, "CSV precisa conter colunas compatíveis com empresa e cnpj"
-
     return df.rename(columns={col_empresa: "empresa", col_cnpj: "cnpj"}), None
 
 def validar_mx(dominio):
@@ -49,6 +46,41 @@ def validar_mx(dominio):
     except:
         return False
 
+# ==============================
+# BRASILAPI — GRÁTIS
+# ==============================
+
+def buscar_dados_cnpj(cnpj: str):
+    """Busca telefone, endereço e UF direto na Receita Federal via BrasilAPI."""
+    cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
+    try:
+        r = requests.get(
+            f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}",
+            timeout=10
+        )
+        if r.status_code == 200:
+            d = r.json()
+            telefone = d.get("ddd_telefone_1", "")
+            if telefone:
+                telefone = re.sub(r"\D", "", telefone)
+                if len(telefone) >= 10:
+                    telefone = f"({telefone[:2]}) {telefone[2:]}"
+            logradouro  = d.get("logradouro", "")
+            numero      = d.get("numero", "")
+            bairro      = d.get("bairro", "")
+            municipio   = d.get("municipio", "")
+            uf          = d.get("uf", "")
+            cep         = d.get("cep", "")
+            endereco = f"{logradouro}, {numero} - {bairro}, {municipio}/{uf} - CEP {cep}"
+            return telefone.strip(), endereco.strip(), uf.strip()
+    except:
+        pass
+    return "", "", ""
+
+# ==============================
+# SERPAPI — 1 CRÉDITO POR BUSCA
+# ==============================
+
 def serpapi_search(query):
     if not SERPAPI_KEY:
         return []
@@ -58,7 +90,7 @@ def serpapi_search(query):
             "q": query,
             "api_key": SERPAPI_KEY,
             "num": 5
-        }, timeout=10)
+        }, timeout=15)
         return r.json().get("organic_results", [])
     except:
         return []
@@ -71,17 +103,12 @@ def buscar_linkedin_empresa(nome_empresa):
     return None
 
 def buscar_dominio_real(nome_empresa, cnpj):
-    """Busca o site oficial da empresa, não o slug do LinkedIn."""
-    resultados = serpapi_search(f"{nome_empresa} CNPJ {cnpj} site oficial")
-    for r in resultados:
+    ignorar = ["linkedin", "facebook", "instagram", "receitafederal",
+               "cnpj.info", "empresas.net", "econodata", "jusbrasil",
+               "tabelasalarios", "wikipedia", "google", "brasilapi"]
+    for r in serpapi_search(f"{nome_empresa} CNPJ {cnpj} site oficial"):
         link = r.get("link", "")
-        if not link:
-            continue
-        # Ignora redes sociais, portais genéricos e agregadores
-        ignorar = ["linkedin", "facebook", "instagram", "receitafederal",
-                   "cnpj.info", "empresas.net", "econodata", "jusbrasil",
-                   "tabelasalarios", "wikipedia", "google"]
-        if any(i in link.lower() for i in ignorar):
+        if not link or any(i in link.lower() for i in ignorar):
             continue
         match = re.search(r"https?://(?:www\.)?([^/]+)", link)
         if match:
@@ -89,31 +116,25 @@ def buscar_dominio_real(nome_empresa, cnpj):
     return None
 
 def buscar_decisor(nome_empresa):
-    """Busca decisor de ESG/Sustentabilidade/Marketing/Financeiro no LinkedIn."""
     cargos = ["ESG", "Sustentabilidade", "Marketing", "Financeiro", "Diretoria"]
     for cargo in cargos:
-        query = f"{nome_empresa} {cargo} site:linkedin.com/in"
-        for r in serpapi_search(query):
-            link = r.get("link", "")
-            titulo = r.get("title", "")
+        for r in serpapi_search(f"{nome_empresa} {cargo} site:linkedin.com/in"):
+            link    = r.get("link", "")
+            titulo  = r.get("title", "")
             snippet = r.get("snippet", "")
             if "linkedin.com/in" in link:
-                nome_decisor = titulo.split(" - ")[0].strip() if " - " in titulo else titulo.strip()
+                nome_decisor  = titulo.split(" - ")[0].strip() if " - " in titulo else titulo.strip()
                 cargo_decisor = snippet[:120] if snippet else cargo
                 return nome_decisor, cargo_decisor, link
     return None, None, None
 
 def gerar_email_provavel(nome_decisor, dominio):
-    """Gera padrões comuns de email corporativo."""
     if not nome_decisor or not dominio:
         return None
     partes = limpar_texto(nome_decisor).lower().split()
     if len(partes) < 2:
         return None
-    primeiro = partes[0]
-    ultimo   = partes[-1]
-    # Padrão mais comum no Brasil: primeiro.ultimo@dominio
-    return f"{primeiro}.{ultimo}@{dominio}"
+    return f"{partes[0]}.{partes[-1]}@{dominio}"
 
 # ==============================
 # ENDPOINT PRINCIPAL
@@ -135,40 +156,42 @@ async def processar_csv(file: UploadFile = File(...)):
     for _, row in df_input.iterrows():
         empresa = limpar_texto(row.get("empresa", ""))
         cnpj    = str(row.get("cnpj", "")).strip()
-        uf      = str(row.get("uf", "")).strip()
 
-        # 1. LinkedIn da empresa
+        # GRÁTIS — BrasilAPI
+        telefone, endereco, uf = buscar_dados_cnpj(cnpj)
+
+        # 1 crédito — LinkedIn empresa
         linkedin_empresa = buscar_linkedin_empresa(empresa)
 
-        # 2. Domínio real (não o slug do LinkedIn)
+        # 1 crédito — Domínio real
         dominio_oficial = buscar_dominio_real(empresa, cnpj)
+        dominio_tem_mx  = validar_mx(dominio_oficial)
 
-        # 3. Validação MX no domínio real
-        dominio_tem_mx = validar_mx(dominio_oficial)
-
-        # 4. Decisor
+        # 1 crédito — Decisor
         nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor(empresa)
 
-        # 5. Email provável (só gera se domínio tem MX ativo)
+        # Grátis — Email gerado
         email_previsto = None
         if dominio_tem_mx:
             email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial)
 
         resultados.append({
-            "empresa":           empresa,
-            "cnpj":              cnpj,
-            "uf":                uf,
-            "dominio_oficial":   dominio_oficial,
-            "dominio_tem_mx":    dominio_tem_mx,
-            "linkedin_empresa":  linkedin_empresa,
-            "decisor_nome":      nome_decisor or "",
-            "decisor_cargo":     cargo_decisor or "",
-            "decisor_linkedin":  linkedin_decisor or "",
-            "email_previsto":    email_previsto or "",
+            "empresa":          empresa,
+            "cnpj":             cnpj,
+            "uf":               uf,
+            "telefone_sede":    telefone,
+            "endereco_sede":    endereco,
+            "dominio_oficial":  dominio_oficial,
+            "dominio_tem_mx":   dominio_tem_mx,
+            "linkedin_empresa": linkedin_empresa,
+            "decisor_nome":     nome_decisor     or "",
+            "decisor_cargo":    cargo_decisor    or "",
+            "decisor_linkedin": linkedin_decisor or "",
+            "email_previsto":   email_previsto   or "",
         })
 
     df_final = pd.DataFrame(resultados)
-    output = io.StringIO()
+    output   = io.StringIO()
     df_final.to_csv(output, index=False)
     output.seek(0)
 
