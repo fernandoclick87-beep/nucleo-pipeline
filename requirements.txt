@@ -1,7 +1,6 @@
-requests
-pandas
-dnspython
-python-dotenv
 fastapi
 uvicorn
+pandas
+requests
+dnspython
 python-multipart
