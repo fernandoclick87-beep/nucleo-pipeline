@@ -59,6 +59,7 @@ def nome_simples(nome_empresa: str) -> str:
 # ==============================
 
 def buscar_dados_cnpj(cnpj: str):
+    """Retorna telefone, endereço, UF e nome fantasia (quando disponível)."""
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     try:
         r = requests.get(
@@ -67,29 +68,26 @@ def buscar_dados_cnpj(cnpj: str):
         )
         if r.status_code == 200:
             d = r.json()
-            telefone  = d.get("ddd_telefone_1", "")
+            telefone = d.get("ddd_telefone_1", "")
             if telefone:
                 t = re.sub(r"\D", "", telefone)
                 telefone = f"({t[:2]}) {t[2:]}" if len(t) >= 10 else t
-            endereco = (f"{d.get('logradouro','')},"
-                        f" {d.get('numero','')} -"
-                        f" {d.get('bairro','')},"
-                        f" {d.get('municipio','')}/{d.get('uf','')} -"
-                        f" CEP {d.get('cep','')}")
-            return telefone.strip(), endereco.strip(), d.get("uf", "")
+            endereco = (f"{d.get('logradouro','')}, {d.get('numero','')} - "
+                        f"{d.get('bairro','')}, {d.get('municipio','')}/{d.get('uf','')} - "
+                        f"CEP {d.get('cep','')}")
+            # Nome fantasia — preferido para buscas, mais reconhecível que razão social
+            nome_fantasia = d.get("nome_fantasia", "") or ""
+            nome_fantasia = limpar_texto(nome_fantasia)
+            return telefone.strip(), endereco.strip(), d.get("uf", ""), nome_fantasia
     except:
         pass
-    return "", "", ""
+    return "", "", "", ""
 
 # ==============================
-# ZEROBOUNCE — VERIFICAÇÃO DE EMAIL
+# ZEROBOUNCE
 # ==============================
 
 def verificar_email(email: str) -> str:
-    """
-    Retorna: valid | invalid | catch-all | unknown | spamtrap | abuse | do_not_mail
-    Consome 1 crédito ZeroBounce por verificação bem-sucedida.
-    """
     if not ZEROBOUNCE_KEY or not email:
         return "não verificado"
     try:
@@ -122,8 +120,9 @@ def serpapi_search(query):
     except:
         return []
 
-def buscar_linkedin_e_dominio(nome_empresa):
-    chave = nome_simples(nome_empresa)
+def buscar_linkedin_e_dominio(nome_busca):
+    """Usa nome_busca (nome fantasia ou razão social) para encontrar LinkedIn e domínio."""
+    chave = nome_simples(nome_busca)
     linkedin_empresa = None
     dominio_oficial  = None
 
@@ -132,7 +131,7 @@ def buscar_linkedin_e_dominio(nome_empresa):
                        "tabelasalarios", "wikipedia", "google", "brasilapi",
                        "glassdoor", "indeed", "catho", "infojobs"]
 
-    for r in serpapi_search(f"{nome_empresa} LinkedIn empresa site oficial"):
+    for r in serpapi_search(f"{nome_busca} LinkedIn empresa site oficial"):
         link     = r.get("link", "")
         contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
 
@@ -151,11 +150,12 @@ def buscar_linkedin_e_dominio(nome_empresa):
 
     return linkedin_empresa, dominio_oficial
 
-def buscar_decisor(nome_empresa):
-    chave  = nome_simples(nome_empresa)
+def buscar_decisor(nome_busca):
+    """Busca decisor recente — valida que cargo é atual pelo snippet."""
+    chave  = nome_simples(nome_busca)
     cargos = "ESG OR Sustentabilidade OR Marketing OR Financeiro OR Diretoria"
 
-    for r in serpapi_search(f"{nome_empresa} {cargos} site:linkedin.com/in"):
+    for r in serpapi_search(f"{nome_busca} {cargos} site:linkedin.com/in"):
         link    = r.get("link", "")
         titulo  = r.get("title", "")
         snippet = r.get("snippet", "").lower()
@@ -163,6 +163,11 @@ def buscar_decisor(nome_empresa):
         if "linkedin.com/in" not in link:
             continue
         if chave not in snippet:
+            continue
+
+        # Rejeita cargos antigos (snippet menciona anos passados)
+        anos_passados = [str(a) for a in range(1990, 2020)]
+        if any(ano in snippet for ano in anos_passados) and "atual" not in snippet and "present" not in snippet:
             continue
 
         nome_bruto = titulo.split(" - ")[0].strip() if " - " in titulo else titulo.strip()
@@ -203,24 +208,28 @@ async def processar_csv(file: UploadFile = File(...)):
         empresa = limpar_texto(row.get("empresa", ""))
         cnpj    = str(row.get("cnpj", "")).strip()
 
-        # GRÁTIS
-        telefone, endereco, uf = buscar_dados_cnpj(cnpj)
+        # GRÁTIS — inclui nome fantasia
+        telefone, endereco, uf, nome_fantasia = buscar_dados_cnpj(cnpj)
+
+        # Usa nome fantasia se disponível, senão usa razão social
+        nome_busca = nome_fantasia if nome_fantasia else empresa
 
         # 1 crédito SerpAPI
-        linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(empresa)
+        linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(nome_busca)
         dominio_tem_mx = validar_mx(dominio_oficial)
 
         # 1 crédito SerpAPI
-        nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor(empresa)
+        nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor(nome_busca)
 
-        # GRÁTIS — gerado
+        # GRÁTIS
         email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial) if dominio_tem_mx else None
 
-        # 1 crédito ZeroBounce — só verifica se gerou email
+        # 1 crédito ZeroBounce
         email_status = verificar_email(email_previsto) if email_previsto else "sem email"
 
         resultados.append({
             "empresa":          empresa,
+            "nome_fantasia":    nome_fantasia,
             "cnpj":             cnpj,
             "uf":               uf,
             "telefone_sede":    telefone,
