@@ -251,3 +251,4 @@ async def processar_csv(file: UploadFile = File(...)):
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=resultado_pipeline.csv"}
+    )
