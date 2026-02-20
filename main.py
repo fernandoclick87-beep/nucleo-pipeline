@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 app = FastAPI()
 SERPAPI_KEY    = os.getenv("SERPAPI_KEY")
 ZEROBOUNCE_KEY = os.getenv("ZEROBOUNCE_KEY")
+APOLLO_KEY     = os.getenv("APOLLO_KEY")
 
 # ==============================
 # UTILIDADES
@@ -86,7 +87,52 @@ def buscar_dados_cnpj(cnpj: str):
     return "", "", "", ""
 
 # ==============================
-# ZEROBOUNCE
+# APOLLO — DECISOR + EMAIL
+# ==============================
+
+def buscar_decisor_apollo(nome_empresa, dominio):
+    """
+    Busca decisor na base Apollo por nome da empresa e domínio.
+    Prioriza cargos de ESG, Sustentabilidade, Marketing, Financeiro, Diretoria.
+    Retorna nome, cargo, linkedin, email.
+    """
+    if not APOLLO_KEY:
+        return None, None, None, None
+
+    cargos_alvo = [
+        "ESG", "Sustentabilidade", "Sustainability",
+        "Marketing", "Financeiro", "Finance",
+        "Diretor", "Director", "VP", "Gerente"
+    ]
+
+    try:
+        payload = {
+            "api_key": APOLLO_KEY,
+            "q_organization_name": nome_empresa,
+            "organization_domains": [dominio] if dominio else [],
+            "person_titles": cargos_alvo,
+            "per_page": 5
+        }
+        r = requests.post(
+            "https://api.apollo.io/v1/mixed_people/search",
+            json=payload,
+            timeout=15
+        )
+        if r.status_code == 200:
+            pessoas = r.json().get("people", [])
+            for p in pessoas:
+                nome  = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+                cargo = p.get("title", "")
+                email = p.get("email", "") or ""
+                linkedin = p.get("linkedin_url", "") or ""
+                if nome:
+                    return nome, cargo, linkedin, email
+    except:
+        pass
+    return None, None, None, None
+
+# ==============================
+# ZEROBOUNCE — só usa se Apollo não trouxer email
 # ==============================
 
 def verificar_email(email: str) -> str:
@@ -105,7 +151,7 @@ def verificar_email(email: str) -> str:
     return "unknown"
 
 # ==============================
-# SERPAPI — 2 CRÉDITOS POR EMPRESA
+# SERPAPI — só LinkedIn + domínio
 # ==============================
 
 def serpapi_search(query):
@@ -127,12 +173,15 @@ def buscar_linkedin_e_dominio(nome_busca):
     linkedin_empresa = None
     dominio_oficial  = None
 
-    ignorar_dominio = ["linkedin", "facebook", "instagram", "receitafederal",
-                       "cnpj.info", "empresas.net", "econodata", "jusbrasil",
-                       "tabelasalarios", "wikipedia", "google", "brasilapi",
-                       "glassdoor", "indeed", "catho", "infojobs"]
+    ignorar_dominio = [
+        "linkedin", "facebook", "instagram", "receitafederal",
+        "cnpj.info", "empresas.net", "econodata", "jusbrasil",
+        "tabelasalarios", "wikipedia", "google", "brasilapi",
+        "glassdoor", "indeed", "catho", "infojobs",
+        "leadiq", "apollo", "hunter", "zoominfo", "reclameaqui",
+        "valor.com", "exame.com", "infomoney", "serasaexperian"
+    ]
 
-    # Palavras relevantes do nome para validação flexível
     palavras_nome = [p for p in nome_busca.lower().split() if len(p) > 4
                      and p not in {"ltda", "brasil", "grupo", "instituto",
                                    "hospital", "clinica", "servicos"}]
@@ -142,7 +191,6 @@ def buscar_linkedin_e_dominio(nome_busca):
         contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
 
         if not linkedin_empresa and "linkedin.com/company" in link:
-            # Aceita se qualquer palavra relevante do nome aparece no contexto
             if any(p in contexto for p in palavras_nome) or chave in link.lower():
                 linkedin_empresa = link
 
@@ -156,40 +204,6 @@ def buscar_linkedin_e_dominio(nome_busca):
             break
 
     return linkedin_empresa, dominio_oficial
-
-def buscar_decisor(nome_busca):
-    chave  = nome_simples(nome_busca)
-    cargos = "ESG OR Sustentabilidade OR Marketing OR Financeiro OR Diretoria"
-
-    palavras_nome = [p for p in nome_busca.lower().split() if len(p) > 4
-                     and p not in {"ltda", "brasil", "grupo", "instituto",
-                                   "hospital", "clinica", "servicos"}]
-
-    for r in serpapi_search(f"{nome_busca} {cargos} site:linkedin.com/in"):
-        link    = r.get("link", "")
-        titulo  = r.get("title", "")
-        snippet = r.get("snippet", "").lower()
-
-        if "linkedin.com/in" not in link:
-            continue
-
-        # Valida que o snippet menciona a empresa (flexível)
-        if not any(p in snippet for p in palavras_nome):
-            continue
-
-        # Rejeita cargos antigos
-        anos_passados = [str(a) for a in range(1990, 2021)]
-        if any(ano in snippet for ano in anos_passados) and "present" not in snippet:
-            continue
-
-        nome_bruto = titulo.split(" - ")[0].strip() if " - " in titulo else titulo.strip()
-        partes = nome_bruto.split()
-        if len(partes) < 2 or any(len(p) <= 2 for p in [partes[0], partes[-1]]):
-            continue
-
-        return nome_bruto, snippet[:120], link
-
-    return None, None, None
 
 def gerar_email_provavel(nome_decisor, dominio):
     if not nome_decisor or not dominio:
@@ -222,22 +236,24 @@ async def processar_csv(file: UploadFile = File(...)):
 
         # GRÁTIS
         telefone, endereco, uf, nome_fantasia = buscar_dados_cnpj(cnpj)
-
-        # Usa nome fantasia se disponível, senão razão social
         nome_busca = nome_fantasia if nome_fantasia else empresa
 
-        # 1 crédito SerpAPI
+        # 1 crédito SerpAPI — LinkedIn + domínio
         linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(nome_busca)
         dominio_tem_mx = validar_mx(dominio_oficial)
 
-        # 1 crédito SerpAPI
-        nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor(nome_busca)
+        # Apollo — decisor + email verificado (consome crédito Apollo)
+        nome_decisor, cargo_decisor, linkedin_decisor, email_apollo = buscar_decisor_apollo(
+            nome_busca, dominio_oficial
+        )
 
-        # GRÁTIS
-        email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial) if dominio_tem_mx else None
-
-        # 1 crédito ZeroBounce
-        email_status = verificar_email(email_previsto) if email_previsto else "sem email"
+        # Se Apollo trouxe email, usa direto; senão gera e valida com ZeroBounce
+        if email_apollo:
+            email_previsto = email_apollo
+            email_status   = "apollo-verified"
+        else:
+            email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial) if dominio_tem_mx else None
+            email_status   = verificar_email(email_previsto) if email_previsto else "sem email"
 
         resultados.append({
             "empresa":          empresa,
