@@ -48,8 +48,13 @@ def validar_mx(dominio):
         return False
 
 def nome_simples(nome_empresa: str) -> str:
-    ignorar = {"sa", "s/a", "ltda", "ltda.", "s.a", "s.a.", "do", "de", "da",
-               "brasil", "brasileira", "grupo", "cia", "companhia", "industria"}
+    ignorar = {
+        "sa", "s/a", "ltda", "ltda.", "s.a", "s.a.", "do", "de", "da", "dos", "das",
+        "brasil", "brasileira", "grupo", "cia", "companhia", "industria",
+        "instituto", "hospital", "clinica", "centro", "fundacao", "associacao",
+        "cooperativa", "servicos", "comercio", "solucoes", "tecnologia",
+        "patologia", "diagnostica", "laboratorio", "nacional", "internacional"
+    }
     partes = limpar_texto(nome_empresa).lower().split()
     principais = [p for p in partes if p not in ignorar and len(p) > 3]
     return principais[0] if principais else partes[0] if partes else ""
@@ -59,7 +64,6 @@ def nome_simples(nome_empresa: str) -> str:
 # ==============================
 
 def buscar_dados_cnpj(cnpj: str):
-    """Retorna telefone, endereço, UF e nome fantasia (quando disponível)."""
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     try:
         r = requests.get(
@@ -75,9 +79,7 @@ def buscar_dados_cnpj(cnpj: str):
             endereco = (f"{d.get('logradouro','')}, {d.get('numero','')} - "
                         f"{d.get('bairro','')}, {d.get('municipio','')}/{d.get('uf','')} - "
                         f"CEP {d.get('cep','')}")
-            # Nome fantasia — preferido para buscas, mais reconhecível que razão social
-            nome_fantasia = d.get("nome_fantasia", "") or ""
-            nome_fantasia = limpar_texto(nome_fantasia)
+            nome_fantasia = limpar_texto(d.get("nome_fantasia", "") or "")
             return telefone.strip(), endereco.strip(), d.get("uf", ""), nome_fantasia
     except:
         pass
@@ -121,7 +123,6 @@ def serpapi_search(query):
         return []
 
 def buscar_linkedin_e_dominio(nome_busca):
-    """Usa nome_busca (nome fantasia ou razão social) para encontrar LinkedIn e domínio."""
     chave = nome_simples(nome_busca)
     linkedin_empresa = None
     dominio_oficial  = None
@@ -131,12 +132,18 @@ def buscar_linkedin_e_dominio(nome_busca):
                        "tabelasalarios", "wikipedia", "google", "brasilapi",
                        "glassdoor", "indeed", "catho", "infojobs"]
 
+    # Palavras relevantes do nome para validação flexível
+    palavras_nome = [p for p in nome_busca.lower().split() if len(p) > 4
+                     and p not in {"ltda", "brasil", "grupo", "instituto",
+                                   "hospital", "clinica", "servicos"}]
+
     for r in serpapi_search(f"{nome_busca} LinkedIn empresa site oficial"):
         link     = r.get("link", "")
         contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
 
         if not linkedin_empresa and "linkedin.com/company" in link:
-            if chave in contexto or chave in link.lower():
+            # Aceita se qualquer palavra relevante do nome aparece no contexto
+            if any(p in contexto for p in palavras_nome) or chave in link.lower():
                 linkedin_empresa = link
 
         if not dominio_oficial and link:
@@ -151,9 +158,12 @@ def buscar_linkedin_e_dominio(nome_busca):
     return linkedin_empresa, dominio_oficial
 
 def buscar_decisor(nome_busca):
-    """Busca decisor recente — valida que cargo é atual pelo snippet."""
     chave  = nome_simples(nome_busca)
     cargos = "ESG OR Sustentabilidade OR Marketing OR Financeiro OR Diretoria"
+
+    palavras_nome = [p for p in nome_busca.lower().split() if len(p) > 4
+                     and p not in {"ltda", "brasil", "grupo", "instituto",
+                                   "hospital", "clinica", "servicos"}]
 
     for r in serpapi_search(f"{nome_busca} {cargos} site:linkedin.com/in"):
         link    = r.get("link", "")
@@ -162,12 +172,14 @@ def buscar_decisor(nome_busca):
 
         if "linkedin.com/in" not in link:
             continue
-        if chave not in snippet:
+
+        # Valida que o snippet menciona a empresa (flexível)
+        if not any(p in snippet for p in palavras_nome):
             continue
 
-        # Rejeita cargos antigos (snippet menciona anos passados)
-        anos_passados = [str(a) for a in range(1990, 2020)]
-        if any(ano in snippet for ano in anos_passados) and "atual" not in snippet and "present" not in snippet:
+        # Rejeita cargos antigos
+        anos_passados = [str(a) for a in range(1990, 2021)]
+        if any(ano in snippet for ano in anos_passados) and "present" not in snippet:
             continue
 
         nome_bruto = titulo.split(" - ")[0].strip() if " - " in titulo else titulo.strip()
@@ -208,10 +220,10 @@ async def processar_csv(file: UploadFile = File(...)):
         empresa = limpar_texto(row.get("empresa", ""))
         cnpj    = str(row.get("cnpj", "")).strip()
 
-        # GRÁTIS — inclui nome fantasia
+        # GRÁTIS
         telefone, endereco, uf, nome_fantasia = buscar_dados_cnpj(cnpj)
 
-        # Usa nome fantasia se disponível, senão usa razão social
+        # Usa nome fantasia se disponível, senão razão social
         nome_busca = nome_fantasia if nome_fantasia else empresa
 
         # 1 crédito SerpAPI
