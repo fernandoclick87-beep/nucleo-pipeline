@@ -12,10 +12,6 @@ app = FastAPI()
 SERPAPI_KEY    = os.getenv("SERPAPI_KEY")
 ZEROBOUNCE_KEY = os.getenv("ZEROBOUNCE_KEY")
 
-# ==============================
-# UTILIDADES
-# ==============================
-
 def limpar_texto(texto):
     if not texto:
         return ""
@@ -59,10 +55,6 @@ def nome_simples(nome_empresa: str) -> str:
     principais = [p for p in partes if p not in ignorar and len(p) > 3]
     return principais[0] if principais else partes[0] if partes else ""
 
-# ==============================
-# BRASILAPI — GRÁTIS
-# ==============================
-
 def buscar_dados_cnpj(cnpj: str):
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     try:
@@ -85,10 +77,6 @@ def buscar_dados_cnpj(cnpj: str):
         pass
     return "", "", "", ""
 
-# ==============================
-# ZEROBOUNCE
-# ==============================
-
 def verificar_email(email: str) -> str:
     if not ZEROBOUNCE_KEY or not email:
         return "não verificado"
@@ -103,10 +91,6 @@ def verificar_email(email: str) -> str:
     except:
         pass
     return "unknown"
-
-# ==============================
-# SERPAPI — 2 CRÉDITOS POR EMPRESA
-# ==============================
 
 def serpapi_search(query):
     if not SERPAPI_KEY:
@@ -160,13 +144,14 @@ def buscar_linkedin_e_dominio(nome_busca):
     return linkedin_empresa, dominio_oficial
 
 def buscar_decisor(nome_busca):
-    cargos = "ESG OR Sustentabilidade OR Marketing OR Financeiro OR Diretoria"
+    # QUERY CORRIGIDA — usa aspas duplas no nome e cargos específicos
+    query = f'"{nome_busca}" "ESG" OR "Sustentabilidade" OR "Investimento Social" OR "Comunicacao" OR "Gente e Gestao" site:linkedin.com/in'
 
     palavras_nome = [p for p in nome_busca.lower().split() if len(p) > 4
                      and p not in {"ltda", "brasil", "grupo", "instituto",
                                    "hospital", "clinica", "servicos"}]
 
-    for r in serpapi_search(f"{nome_busca} {cargos} site:linkedin.com/in"):
+    for r in serpapi_search(query):
         link    = r.get("link", "")
         titulo  = r.get("title", "")
         snippet = r.get("snippet", "").lower()
@@ -196,10 +181,6 @@ def gerar_email_provavel(nome_decisor, dominio):
     if len(partes) < 2 or any(len(p) <= 2 for p in [partes[0], partes[-1]]):
         return None
     return f"{partes[0]}.{partes[-1]}@{dominio}"
-
-# ==============================
-# ENDPOINT PRINCIPAL
-# ==============================
 
 @app.post("/processar")
 async def processar_csv(file: UploadFile = File(...)):
