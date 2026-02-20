@@ -55,6 +55,15 @@ def nome_simples(nome_empresa: str) -> str:
     principais = [p for p in partes if p not in ignorar and len(p) > 3]
     return principais[0] if principais else partes[0] if partes else ""
 
+def nome_para_busca(nome_fantasia: str, empresa: str) -> str:
+    """
+    Usa nome_fantasia se tiver pelo menos 2 palavras significativas.
+    Caso contrário usa a razão social original (com acentos preservados).
+    """
+    if nome_fantasia and len(nome_fantasia.split()) >= 2:
+        return nome_fantasia
+    return empresa
+
 def buscar_dados_cnpj(cnpj: str):
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     try:
@@ -71,7 +80,7 @@ def buscar_dados_cnpj(cnpj: str):
             endereco = (f"{d.get('logradouro','')}, {d.get('numero','')} - "
                         f"{d.get('bairro','')}, {d.get('municipio','')}/{d.get('uf','')} - "
                         f"CEP {d.get('cep','')}")
-            nome_fantasia = limpar_texto(d.get("nome_fantasia", "") or "")
+            nome_fantasia = (d.get("nome_fantasia", "") or "").strip()
             return telefone.strip(), endereco.strip(), d.get("uf", ""), nome_fantasia
     except:
         pass
@@ -120,7 +129,7 @@ def buscar_linkedin_e_dominio(nome_busca):
         "valor.com", "exame.com", "infomoney", "serasaexperian"
     ]
 
-    palavras_nome = [p for p in nome_busca.lower().split() if len(p) > 4
+    palavras_nome = [p for p in limpar_texto(nome_busca).lower().split() if len(p) > 4
                      and p not in {"ltda", "brasil", "grupo", "instituto",
                                    "hospital", "clinica", "servicos"}]
 
@@ -143,11 +152,14 @@ def buscar_linkedin_e_dominio(nome_busca):
 
     return linkedin_empresa, dominio_oficial
 
-def buscar_decisor(nome_busca):
-    # QUERY CORRIGIDA — usa aspas duplas no nome e cargos específicos
-    query = f'"{nome_busca}" "ESG" OR "Sustentabilidade" OR "Investimento Social" OR "Comunicacao" OR "Gente e Gestao" site:linkedin.com/in'
+def buscar_decisor(nome_busca_original: str):
+    """
+    Usa o nome original (com acentos) para a query do Google
+    porque o LinkedIn indexa com acentos.
+    """
+    query = f'"{nome_busca_original}" "ESG" OR "Sustentabilidade" OR "Investimento Social" OR "Comunicacao" OR "Gente e Gestao" site:linkedin.com/in'
 
-    palavras_nome = [p for p in nome_busca.lower().split() if len(p) > 4
+    palavras_nome = [p for p in limpar_texto(nome_busca_original).lower().split() if len(p) > 4
                      and p not in {"ltda", "brasil", "grupo", "instituto",
                                    "hospital", "clinica", "servicos"}]
 
@@ -196,15 +208,18 @@ async def processar_csv(file: UploadFile = File(...)):
     resultados = []
 
     for _, row in df_input.iterrows():
-        empresa = limpar_texto(row.get("empresa", ""))
+        empresa = str(row.get("empresa", "")).strip()
         cnpj    = str(row.get("cnpj", "")).strip()
 
         telefone, endereco, uf, nome_fantasia = buscar_dados_cnpj(cnpj)
-        nome_busca = nome_fantasia if nome_fantasia else empresa
+
+        # CORRIGIDO: usa razão social se nome_fantasia for muito curto
+        nome_busca = nome_para_busca(nome_fantasia, empresa)
 
         linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(nome_busca)
         dominio_tem_mx = validar_mx(dominio_oficial)
 
+        # CORRIGIDO: passa nome original com acentos para o decisor
         nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor(nome_busca)
 
         email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial) if dominio_tem_mx else None
@@ -236,4 +251,3 @@ async def processar_csv(file: UploadFile = File(...)):
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=resultado_pipeline.csv"}
-    )
