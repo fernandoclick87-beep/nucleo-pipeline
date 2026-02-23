@@ -71,13 +71,11 @@ def eh_nome_pessoa(nome):
     if not nome:
         return False
     nao_pessoa = [
-        "grupo", "assessoria", "consultoria", "agencia", "agencia",
-        "gestao", "gestao", "solucoes", "solucoes", "servicos", "servicos",
-        "comercial", "marketing", "comunicacao", "comunicacao", "holding",
-        "organicos", "organicos", "associacao", "associacao"
+        "grupo", "assessoria", "consultoria", "agencia", "gestao",
+        "solucoes", "servicos", "comercial", "marketing", "comunicacao",
+        "holding", "organicos", "associacao", "cooperativa", "industria"
     ]
-    nome_lower = nome.lower()
-    if any(p in nome_lower for p in nao_pessoa):
+    if any(p in nome.lower() for p in nao_pessoa):
         return False
     partes = nome.split()
     if len(partes) < 2:
@@ -126,15 +124,11 @@ def serpapi_search(query):
 
 
 def buscar_linkedin_e_dominio(nome_busca, cnpj):
-    """
-    Tenta primeiro ancorar pelo CNPJ para evitar resultados errados.
-    Se nao encontrar, cai para busca por nome.
-    """
     ignorar_dominio = [
         "linkedin", "facebook", "instagram", "receitafederal",
         "cnpj.info", "empresas.net", "econodata", "jusbrasil",
         "tabelasalarios", "wikipedia", "google", "brasilapi",
-        "glassdoor", "indeed", "catho", "infojobs",
+        "glassdoor", "indeed", "catho", "infojobs", "mercadolivre",
         "leadiq", "apollo", "hunter", "zoominfo", "reclameaqui",
         "valor.com", "exame.com", "infomoney", "serasaexperian",
         "a16z.com", "hibrazilmarket", "onlineempresas"
@@ -144,66 +138,45 @@ def buscar_linkedin_e_dominio(nome_busca, cnpj):
     dominio_oficial  = None
     chave = nome_simples(nome_busca)
 
-    # ETAPA 1: busca pelo CNPJ para confirmar dominio e linkedin corretos
+    # ETAPA 1: ancora pelo CNPJ
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
-    resultados_cnpj = serpapi_search(f"{cnpj_limpo} site oficial linkedin")
-
-    for r in resultados_cnpj:
-        link     = r.get("link", "")
-        contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
-
+    for r in serpapi_search(f"{cnpj_limpo} site oficial linkedin"):
+        link = r.get("link", "")
         if not linkedin_empresa and "linkedin.com/company" in link:
             linkedin_empresa = link
-
         if not dominio_oficial and link:
             if not any(i in link.lower() for i in ignorar_dominio):
                 match = re.search(r"https?://(?:www\.)?([^/]+)", link)
                 if match:
                     dominio_oficial = match.group(1)
-
         if linkedin_empresa and dominio_oficial:
             break
 
-    # ETAPA 2: se nao achou pelo CNPJ, tenta pelo nome
+    # ETAPA 2: fallback por nome
     if not linkedin_empresa or not dominio_oficial:
         palavras_nome = [
             p for p in limpar_texto(nome_busca).lower().split()
             if len(p) > 4 and p not in {"ltda", "brasil", "grupo", "instituto", "hospital", "clinica", "servicos"}
         ]
-
         for r in serpapi_search(f"{nome_busca} LinkedIn empresa site oficial"):
             link     = r.get("link", "")
             contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
-
             if not linkedin_empresa and "linkedin.com/company" in link:
                 if any(p in contexto for p in palavras_nome) or chave in link.lower():
                     linkedin_empresa = link
-
             if not dominio_oficial and link:
                 if not any(i in link.lower() for i in ignorar_dominio):
                     match = re.search(r"https?://(?:www\.)?([^/]+)", link)
                     if match:
                         dominio_oficial = match.group(1)
-
             if linkedin_empresa and dominio_oficial:
                 break
 
     return linkedin_empresa, dominio_oficial
 
 
-def buscar_decisor(nome_busca_original):
-    query = (
-        f'"{nome_busca_original}" "ESG" OR "Sustentabilidade" OR '
-        f'"Investimento Social" OR "Comunicacao" OR "Gente e Gestao" '
-        f'site:linkedin.com/in'
-    )
-
-    palavras_nome = [
-        p for p in limpar_texto(nome_busca_original).lower().split()
-        if len(p) > 4 and p not in {"ltda", "brasil", "grupo", "instituto", "hospital", "clinica", "servicos"}
-    ]
-
-    for r in serpapi_search(query):
+def _extrair_decisor_dos_resultados(resultados, palavras_nome):
+    for r in resultados:
         link    = r.get("link", "")
         titulo  = r.get("title", "")
         snippet = r.get("snippet", "").lower()
@@ -235,6 +208,36 @@ def buscar_decisor(nome_busca_original):
         return nome_bruto, cargo_bruto, link
 
     return None, None, None
+
+
+def buscar_decisor(nome_busca_original):
+    palavras_nome = [
+        p for p in limpar_texto(nome_busca_original).lower().split()
+        if len(p) > 4 and p not in {"ltda", "brasil", "grupo", "instituto", "hospital", "clinica", "servicos"}
+    ]
+
+    # TENTATIVA 1: ESG / Sustentabilidade
+    query_esg = (
+        f'"{nome_busca_original}" "ESG" OR "Sustentabilidade" OR '
+        f'"Investimento Social" OR "Comunicacao" OR "Gente e Gestao" '
+        f'site:linkedin.com/in'
+    )
+    nome, cargo, link = _extrair_decisor_dos_resultados(
+        serpapi_search(query_esg), palavras_nome
+    )
+    if nome:
+        return nome, cargo, link
+
+    # TENTATIVA 2: executivo geral (fallback para empresas menores)
+    query_exec = (
+        f'"{nome_busca_original}" "Diretor" OR "Diretora" OR "CEO" OR '
+        f'"Presidente" OR "Socio" OR "Gerente" OR "Head" '
+        f'site:linkedin.com/in'
+    )
+    nome, cargo, link = _extrair_decisor_dos_resultados(
+        serpapi_search(query_exec), palavras_nome
+    )
+    return nome, cargo, link
 
 
 def gerar_email_provavel(nome_decisor, dominio):
@@ -282,7 +285,6 @@ async def processar_csv(file: UploadFile = File(...)):
         telefone, endereco, uf, nome_fantasia = buscar_dados_cnpj(cnpj)
         nome_busca = nome_para_busca(nome_fantasia, empresa)
 
-        # CNPJ como ancora para dominio e linkedin
         linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(nome_busca, cnpj)
         dominio_tem_mx = validar_mx(dominio_oficial)
 
