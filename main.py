@@ -5,6 +5,7 @@ import unicodedata
 import pandas as pd
 import requests
 import dns.resolver
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 
@@ -54,7 +55,7 @@ def nome_simples(nome_empresa):
         "brasil", "brasileira", "grupo", "cia", "companhia", "industria",
         "instituto", "hospital", "clinica", "centro", "fundacao", "associacao",
         "cooperativa", "servicos", "comercio", "solucoes", "tecnologia",
-        "patologia", "diagnostica", "laboratorio", "nacional", "internacional"
+        "nacional", "internacional"
     }
     partes = limpar_texto(nome_empresa).lower().split()
     principais = [p for p in partes if p not in ignorar and len(p) > 3]
@@ -73,14 +74,33 @@ def eh_nome_pessoa(nome):
     nao_pessoa = [
         "grupo", "assessoria", "consultoria", "agencia", "gestao",
         "solucoes", "servicos", "comercial", "marketing", "comunicacao",
-        "holding", "organicos", "associacao", "cooperativa", "industria"
+        "holding", "organicos", "associacao", "cooperativa", "industria",
+        "empresa", "companhia", "ltda", "s/a"
     ]
     if any(p in nome.lower() for p in nao_pessoa):
         return False
     partes = nome.split()
     if len(partes) < 2:
         return False
+    # rejeita se primeira ou ultima palavra for muito curta
+    if len(partes[0]) < 3 or len(partes[-1]) < 3:
+        return False
     return True
+
+
+def serpapi_search(query):
+    if not SERPAPI_KEY:
+        return []
+    try:
+        r = requests.get("https://serpapi.com/search", params={
+            "engine": "google",
+            "q": query,
+            "api_key": SERPAPI_KEY,
+            "num": 5
+        }, timeout=15)
+        return r.json().get("organic_results", [])
+    except Exception:
+        return []
 
 
 def buscar_dados_cnpj(cnpj):
@@ -108,21 +128,6 @@ def buscar_dados_cnpj(cnpj):
     return "", "", "", ""
 
 
-def serpapi_search(query):
-    if not SERPAPI_KEY:
-        return []
-    try:
-        r = requests.get("https://serpapi.com/search", params={
-            "engine": "google",
-            "q": query,
-            "api_key": SERPAPI_KEY,
-            "num": 5
-        }, timeout=15)
-        return r.json().get("organic_results", [])
-    except Exception:
-        return []
-
-
 def buscar_linkedin_e_dominio(nome_busca, cnpj):
     ignorar_dominio = [
         "linkedin", "facebook", "instagram", "receitafederal",
@@ -131,7 +136,7 @@ def buscar_linkedin_e_dominio(nome_busca, cnpj):
         "glassdoor", "indeed", "catho", "infojobs", "mercadolivre",
         "leadiq", "apollo", "hunter", "zoominfo", "reclameaqui",
         "valor.com", "exame.com", "infomoney", "serasaexperian",
-        "a16z.com", "hibrazilmarket", "onlineempresas"
+        "a16z.com", "hibrazilmarket", "onlineempresas", "gov.br"
     ]
 
     linkedin_empresa = None
@@ -175,76 +180,158 @@ def buscar_linkedin_e_dominio(nome_busca, cnpj):
     return linkedin_empresa, dominio_oficial
 
 
-def _extrair_decisor_dos_resultados(resultados, palavras_nome):
+# ---------------------------------------------------------------------------
+# CARGOS ALVO para patrocinio cultural
+# ---------------------------------------------------------------------------
+CARGOS_ALVO = [
+    "esg", "sustentabilidade", "responsabilidade social", "relacoes institucionais",
+    "relações institucionais", "impacto", "patrocinio", "patrocínio",
+    "comunicacao", "comunicação", "marketing", "institucional",
+    "diretor", "diretora", "head", "gerente", "presidente", "ceo", "socio"
+]
+
+
+def extrair_nome_cargo_do_texto(texto, nome_empresa):
+    """
+    Tenta extrair pares (nome, cargo) de um bloco de texto livre.
+    Procura padroes como 'Nome Sobrenome, Cargo' ou 'Cargo: Nome Sobrenome'.
+    """
+    texto_limpo = limpar_texto(texto)
+    palavras_empresa = [p for p in limpar_texto(nome_empresa).lower().split() if len(p) > 4]
+
+    # padrao: "Nome Sobrenome, cargo" ou "Nome Sobrenome - cargo"
+    padrao = re.findall(
+        r'([A-Z][a-z]+ (?:[A-Z][a-z]+ ){0,2}[A-Z][a-z]+)[,\-–]\s*([^\.\n]{5,60})',
+        texto_limpo
+    )
+
+    for nome, cargo in padrao:
+        nome = nome.strip()
+        cargo_lower = cargo.lower()
+        if not eh_nome_pessoa(nome):
+            continue
+        if any(c in cargo_lower for c in CARGOS_ALVO):
+            return nome, cargo.strip()
+
+    return None, None
+
+
+def buscar_decisor_via_noticias(nome_busca):
+    """
+    Busca noticias/press releases que mencionem a empresa e cargos relevantes.
+    Extrai nome e cargo do snippet.
+    """
+    query = (
+        f'"{nome_busca}" patrocinio OR "lei rouanet" OR "relacoes institucionais" '
+        f'OR "responsabilidade social" OR "impacto comunitario" OR "apoio cultural" '
+        f'OR sustentabilidade OR ESG'
+    )
+    resultados = serpapi_search(query)
+
     for r in resultados:
-        link    = r.get("link", "")
+        snippet = r.get("snippet", "")
         titulo  = r.get("title", "")
-        snippet = r.get("snippet", "").lower()
+        texto   = titulo + " " + snippet
 
-        if "linkedin.com/in" not in link:
-            continue
-        if not any(p in snippet for p in palavras_nome):
-            continue
-
-        anos_passados = [str(a) for a in range(1990, 2021)]
-        if any(ano in snippet for ano in anos_passados) and "present" not in snippet:
-            continue
-
-        partes_titulo = titulo.split(" - ")
-        nome_bruto = partes_titulo[0].strip()
-
-        if len(partes_titulo) >= 3:
-            cargo_bruto = partes_titulo[1].strip()
-        else:
-            cargo_bruto = snippet[:80]
-
-        if not eh_nome_pessoa(nome_bruto):
-            continue
-
-        partes = nome_bruto.split()
-        if len(partes) < 2 or any(len(p) <= 2 for p in [partes[0], partes[-1]]):
-            continue
-
-        return nome_bruto, cargo_bruto, link
+        nome, cargo = extrair_nome_cargo_do_texto(texto, nome_busca)
+        if nome and cargo:
+            return nome, cargo, r.get("link", "")
 
     return None, None, None
 
 
-def buscar_decisor(nome_busca_original):
-    palavras_nome = [
-        p for p in limpar_texto(nome_busca_original).lower().split()
-        if len(p) > 4 and p not in {"ltda", "brasil", "grupo", "instituto", "hospital", "clinica", "servicos"}
+def scrape_pagina(url):
+    """Faz scrape simples de uma URL e retorna texto limpo."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, timeout=10, headers=headers)
+        if r.status_code != 200:
+            return ""
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        return soup.get_text(separator=" ", strip=True)[:5000]
+    except Exception:
+        return ""
+
+
+def buscar_decisor_via_site(dominio, nome_busca):
+    """
+    Tenta paginas comuns de equipe/diretoria no site da empresa.
+    Extrai nome e cargo do HTML.
+    """
+    if not dominio:
+        return None, None, None
+
+    paginas_candidatas = [
+        f"https://{dominio}/equipe",
+        f"https://{dominio}/sobre",
+        f"https://{dominio}/quem-somos",
+        f"https://{dominio}/diretoria",
+        f"https://{dominio}/time",
+        f"https://{dominio}/empresa",
+        f"https://{dominio}/sobre-nos",
     ]
 
-    # TENTATIVA 1: ESG / Sustentabilidade
-    query_esg = (
-        f'"{nome_busca_original}" "ESG" OR "Sustentabilidade" OR '
-        f'"Investimento Social" OR "Comunicacao" OR "Gente e Gestao" '
-        f'site:linkedin.com/in'
-    )
-    nome, cargo, link = _extrair_decisor_dos_resultados(
-        serpapi_search(query_esg), palavras_nome
-    )
-    if nome:
-        return nome, cargo, link
+    for url in paginas_candidatas:
+        texto = scrape_pagina(url)
+        if not texto:
+            continue
+        nome, cargo = extrair_nome_cargo_do_texto(texto, nome_busca)
+        if nome and cargo:
+            return nome, cargo, url
 
-    # TENTATIVA 2: executivo geral (fallback para empresas menores)
-    query_exec = (
-        f'"{nome_busca_original}" "Diretor" OR "Diretora" OR "CEO" OR '
-        f'"Presidente" OR "Socio" OR "Gerente" OR "Head" '
-        f'site:linkedin.com/in'
-    )
-    nome, cargo, link = _extrair_decisor_dos_resultados(
-        serpapi_search(query_exec), palavras_nome
-    )
-    return nome, cargo, link
+    return None, None, None
+
+
+def buscar_linkedin_pessoa(nome_decisor, nome_empresa):
+    """
+    Com o nome da pessoa ja encontrado, busca o perfil LinkedIn diretamente.
+    """
+    if not nome_decisor:
+        return None
+    query = f'"{nome_decisor}" "{nome_empresa}" site:linkedin.com/in'
+    resultados = serpapi_search(query)
+    for r in resultados:
+        link = r.get("link", "")
+        if "linkedin.com/in" in link:
+            # valida que nao esta truncado
+            partes = [p for p in link.split("/") if p]
+            slug_idx = next((i for i, p in enumerate(partes) if p == "in"), None)
+            if slug_idx and slug_idx + 1 < len(partes) and len(partes[slug_idx + 1]) >= 3:
+                return link
+    return None
+
+
+def buscar_decisor_completo(nome_busca, dominio):
+    """
+    Fluxo completo:
+    1. Noticias/press releases
+    2. Scrape do site
+    3. LinkedIn direto com o nome encontrado
+    """
+    nome, cargo, fonte = None, None, None
+
+    # ETAPA 1: noticias
+    nome, cargo, fonte = buscar_decisor_via_noticias(nome_busca)
+
+    # ETAPA 2: scrape do site (se noticias nao acharam)
+    if not nome:
+        nome, cargo, fonte = buscar_decisor_via_site(dominio, nome_busca)
+
+    # ETAPA 3: linkedin da pessoa encontrada
+    linkedin_pessoa = None
+    if nome:
+        linkedin_pessoa = buscar_linkedin_pessoa(nome, nome_busca)
+
+    return nome, cargo, linkedin_pessoa
 
 
 def gerar_email_provavel(nome_decisor, dominio):
     if not nome_decisor or not dominio:
         return None
     partes = limpar_texto(nome_decisor).lower().split()
-    if len(partes) < 2 or any(len(p) <= 2 for p in [partes[0], partes[-1]]):
+    if len(partes) < 2 or len(partes[0]) < 3 or len(partes[-1]) < 3:
         return None
     return f"{partes[0]}.{partes[-1]}@{dominio}"
 
@@ -288,7 +375,9 @@ async def processar_csv(file: UploadFile = File(...)):
         linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(nome_busca, cnpj)
         dominio_tem_mx = validar_mx(dominio_oficial)
 
-        nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor(nome_busca)
+        nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor_completo(
+            nome_busca, dominio_oficial
+        )
 
         email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial) if dominio_tem_mx else None
         email_status   = verificar_email(email_previsto) if email_previsto else "sem email"
@@ -320,3 +409,8 @@ async def processar_csv(file: UploadFile = File(...)):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=resultado_pipeline.csv"}
     )
+```
+
+Tem uma dependência nova — o `beautifulsoup4` para o scrape. Verifica se o `requirements.txt` no GitHub tem essa linha:
+```
+beautifulsoup4==4.12.3
