@@ -409,8 +409,4 @@ async def processar_csv(file: UploadFile = File(...)):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=resultado_pipeline.csv"}
     )
-```
 
-Tem uma dependência nova — o `beautifulsoup4` para o scrape. Verifica se o `requirements.txt` no GitHub tem essa linha:
-```
-beautifulsoup4==4.12.3
