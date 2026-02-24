@@ -104,16 +104,30 @@ def serpapi_search(query):
         return []
 
 
+DOMINIOS_CONFIAVEIS_CNPJ = [
+    "casadosdados.com.br",
+    "econodata.com.br",
+    "cnpj.biz",
+    "consultascnpj.com",
+    "situacaocadastral.info",
+    "numerodozap.com",
+]
+
+
 def extrair_nome_fantasia_do_cnpj(cnpj, razao_social):
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     resultados = serpapi_search(cnpj_limpo)
     razao_lower = limpar_texto(razao_social).lower()
 
     for r in resultados:
-        titulo  = r.get("title", "")
+        link    = r.get("link", "")
         snippet = r.get("snippet", "")
 
-        # Padrao explicito no snippet: "nome fantasia: XPTO"
+        # So aceita resultados de dominios confiaveis de consulta CNPJ
+        if not any(d in link.lower() for d in DOMINIOS_CONFIAVEIS_CNPJ):
+            continue
+
+        # Padrao explicito no snippet: "Nome Fantasia: XPTO"
         match = re.search(r"nome fantasia[:\s]+([A-Z][A-Z\s]{3,40})", snippet, re.IGNORECASE)
         if match:
             candidato = match.group(1).strip().title()
@@ -121,6 +135,7 @@ def extrair_nome_fantasia_do_cnpj(cnpj, razao_social):
                 return candidato
 
         # Pega primeira parte do titulo antes de " - " ou " em "
+        titulo = r.get("title", "")
         partes_titulo = re.split(r" - | em ", titulo)
         if partes_titulo:
             candidato = partes_titulo[0].strip()
@@ -130,7 +145,8 @@ def extrair_nome_fantasia_do_cnpj(cnpj, razao_social):
                     len(candidato) > 4 and
                     not any(x in candidato_lower for x in [
                         "cnpj", "consulta", "empresa", "dados", "serasa",
-                        "receita", "situacao", "cadastral", "informacoes"
+                        "receita", "situacao", "cadastral", "informacoes",
+                        "goncalves", "salles", "industria", "comercio"
                     ])):
                 return candidato.title()
 
@@ -177,8 +193,8 @@ def buscar_linkedin_e_dominio(nome_busca, cnpj):
         "a16z.com", "hibrazilmarket", "onlineempresas", "gov.br",
         "oecd.org", "compreaviacao.com.br", "obahortifruti.com.br",
         "kaeferbrasil.com.br", "casadosdados", "cnpj.biz", "consultascnpj",
-        "situacaocadastral", "numerodozap", "linkana", "econodata",
-        "cnpjbrasil.com", "cnpj.linkana"
+        "situacaocadastral", "numerodozap", "linkana", "cnpjbrasil",
+        "portaldaindustria", "look2agro", "mitel.com"
     ]
 
     linkedin_empresa = None
