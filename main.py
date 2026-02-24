@@ -50,6 +50,7 @@ def validar_mx(dominio):
 
 
 def nome_simples(nome_empresa):
+    """Retorna 1 ou 2 palavras representativas do nome da empresa para busca."""
     ignorar = {
         "sa", "s/a", "ltda", "ltda.", "s.a", "s.a.", "do", "de", "da", "dos", "das",
         "brasil", "brasileira", "grupo", "cia", "companhia", "industria",
@@ -58,9 +59,22 @@ def nome_simples(nome_empresa):
         "nacional", "internacional", "produtos", "quimicos", "sistemas",
         "eletronicos", "seguranca", "industriais"
     }
+    # Palavras muito genericas que sozinhas nao identificam a empresa
+    genericas = {
+        "manteiga", "aviacao", "pier", "rip", "gps", "tec", "online",
+        "fortaleza", "cooper", "limpa", "clean", "servico", "service"
+    }
     partes = limpar_texto(nome_empresa).lower().split()
-    principais = [p for p in partes if p not in ignorar and len(p) > 3]
-    return principais[0] if principais else partes[0] if partes else ""
+    principais = [p for p in partes if p not in ignorar and len(p) > 2]
+
+    if not principais:
+        return nome_empresa
+
+    # Se a primeira palavra principal for generica, tenta usar duas palavras
+    if principais[0] in genericas and len(principais) >= 2:
+        return f"{principais[0]} {principais[1]}"
+
+    return principais[0]
 
 
 def nome_para_busca(nome_fantasia, empresa):
@@ -123,7 +137,6 @@ def extrair_nome_fantasia_do_cnpj(cnpj, razao_social):
         link    = r.get("link", "")
         snippet = r.get("snippet", "")
 
-        # So aceita resultados de dominios confiaveis de consulta CNPJ
         if not any(d in link.lower() for d in DOMINIOS_CONFIAVEIS_CNPJ):
             continue
 
@@ -145,8 +158,7 @@ def extrair_nome_fantasia_do_cnpj(cnpj, razao_social):
                     len(candidato) > 4 and
                     not any(x in candidato_lower for x in [
                         "cnpj", "consulta", "empresa", "dados", "serasa",
-                        "receita", "situacao", "cadastral", "informacoes",
-                        "goncalves", "salles", "industria", "comercio"
+                        "receita", "situacao", "cadastral", "informacoes"
                     ])):
                 return candidato.title()
 
@@ -191,7 +203,7 @@ def buscar_linkedin_e_dominio(nome_busca, cnpj):
         "leadiq", "apollo", "hunter", "zoominfo", "reclameaqui",
         "valor.com", "exame.com", "infomoney", "serasaexperian",
         "a16z.com", "hibrazilmarket", "onlineempresas", "gov.br",
-        "oecd.org", "compreaviacao.com.br", "obahortifruti.com.br",
+        "oecd.org", "obahortifruti.com.br",
         "kaeferbrasil.com.br", "casadosdados", "cnpj.biz", "consultascnpj",
         "situacaocadastral", "numerodozap", "linkana", "cnpjbrasil",
         "portaldaindustria", "look2agro", "mitel.com"
@@ -219,7 +231,7 @@ def buscar_linkedin_e_dominio(nome_busca, cnpj):
             link     = r.get("link", "")
             contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
             if not linkedin_empresa and "linkedin.com/company" in link:
-                if chave in link.lower() or chave in contexto:
+                if chave.split()[0] in link.lower() or chave.split()[0] in contexto:
                     linkedin_empresa = link
             if not dominio_oficial and link:
                 if not any(i in link.lower() for i in ignorar_dominio):
