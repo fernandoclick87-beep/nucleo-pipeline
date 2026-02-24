@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 app = FastAPI()
 SERPAPI_KEY    = os.getenv("SERPAPI_KEY")
 ZEROBOUNCE_KEY = os.getenv("ZEROBOUNCE_KEY")
+HUNTER_KEY     = os.getenv("HUNTER_KEY")
 
 
 def limpar_texto(texto):
@@ -54,7 +55,8 @@ def nome_simples(nome_empresa):
         "brasil", "brasileira", "grupo", "cia", "companhia", "industria",
         "instituto", "hospital", "clinica", "centro", "fundacao", "associacao",
         "cooperativa", "servicos", "comercio", "solucoes", "tecnologia",
-        "nacional", "internacional"
+        "nacional", "internacional", "produtos", "quimicos", "sistemas",
+        "eletronicos", "seguranca", "industriais"
     }
     partes = limpar_texto(nome_empresa).lower().split()
     principais = [p for p in partes if p not in ignorar and len(p) > 3]
@@ -156,15 +158,11 @@ def buscar_linkedin_e_dominio(nome_busca, cnpj):
             break
 
     if not linkedin_empresa or not dominio_oficial:
-        palavras_nome = [
-            p for p in limpar_texto(nome_busca).lower().split()
-            if len(p) > 4 and p not in {"ltda", "brasil", "grupo", "instituto", "hospital", "clinica", "servicos"}
-        ]
         for r in serpapi_search(f"{nome_busca} LinkedIn empresa site oficial"):
             link     = r.get("link", "")
             contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
             if not linkedin_empresa and "linkedin.com/company" in link:
-                if any(p in contexto for p in palavras_nome) or chave in link.lower():
+                if chave in link.lower() or chave in contexto:
                     linkedin_empresa = link
             if not dominio_oficial and link:
                 if not any(i in link.lower() for i in ignorar_dominio):
@@ -177,71 +175,118 @@ def buscar_linkedin_e_dominio(nome_busca, cnpj):
     return linkedin_empresa, dominio_oficial
 
 
-def _extrair_decisor(resultados, palavras_nome):
-    for r in resultados:
-        link    = r.get("link", "")
-        titulo  = r.get("title", "")
-        snippet = r.get("snippet", "").lower()
+CARGOS_PRIORITARIOS = [
+    "esg", "sustentabilidade", "sustainability", "relacoes institucionais",
+    "responsabilidade social", "investimento social", "impacto social",
+    "comunicacao", "marketing", "patrocinio"
+]
 
+CARGOS_EXECUTIVOS = [
+    "ceo", "coo", "cfo", "presidente", "vice-presidente", "vice presidente",
+    "diretor", "diretora", "director", "socio", "gerente", "head", "manager"
+]
+
+
+def buscar_decisor_hunter(dominio):
+    if not HUNTER_KEY or not dominio:
+        return None, None, None, None
+
+    try:
+        r = requests.get("https://api.hunter.io/v2/domain-search", params={
+            "domain": dominio,
+            "api_key": HUNTER_KEY,
+            "limit": 10,
+            "seniority": "executive,director,manager"
+        }, timeout=15)
+
+        if r.status_code != 200:
+            return None, None, None, None
+
+        emails = r.json().get("data", {}).get("emails", [])
+        if not emails:
+            return None, None, None, None
+
+        for e in emails:
+            cargo = (e.get("position") or "").lower()
+            if any(c in cargo for c in CARGOS_PRIORITARIOS):
+                return (
+                    f"{e.get('first_name','')} {e.get('last_name','')}".strip(),
+                    e.get("position", ""),
+                    e.get("linkedin", ""),
+                    e.get("value", "")
+                )
+
+        for e in emails:
+            cargo = (e.get("position") or "").lower()
+            if any(c in cargo for c in CARGOS_EXECUTIVOS):
+                return (
+                    f"{e.get('first_name','')} {e.get('last_name','')}".strip(),
+                    e.get("position", ""),
+                    e.get("linkedin", ""),
+                    e.get("value", "")
+                )
+
+        for e in emails:
+            if e.get("first_name") and e.get("last_name"):
+                return (
+                    f"{e.get('first_name','')} {e.get('last_name','')}".strip(),
+                    e.get("position", ""),
+                    e.get("linkedin", ""),
+                    e.get("value", "")
+                )
+
+    except Exception:
+        pass
+
+    return None, None, None, None
+
+
+def buscar_decisor_serpapi(nome_busca):
+    chave = nome_simples(nome_busca)
+    if not chave:
+        return None, None, None
+
+    query = f"{chave} linkedin"
+    resultados = serpapi_search(query)
+
+    for r in resultados:
+        link   = r.get("link", "")
+        titulo = r.get("title", "")
         if "linkedin.com/in" not in link:
             continue
-        if palavras_nome and not any(p in snippet for p in palavras_nome):
+        cargo_lower = titulo.lower()
+        if any(c in cargo_lower for c in CARGOS_PRIORITARIOS):
+            partes = titulo.split(" - ")
+            nome = partes[0].strip()
+            cargo = partes[1].strip() if len(partes) >= 2 else ""
+            if eh_nome_pessoa(nome):
+                return nome, cargo, link
+
+    for r in resultados:
+        link   = r.get("link", "")
+        titulo = r.get("title", "")
+        if "linkedin.com/in" not in link:
             continue
+        cargo_lower = titulo.lower()
+        if any(c in cargo_lower for c in CARGOS_EXECUTIVOS):
+            partes = titulo.split(" - ")
+            nome = partes[0].strip()
+            cargo = partes[1].strip() if len(partes) >= 2 else ""
+            if eh_nome_pessoa(nome):
+                return nome, cargo, link
 
-        partes_titulo = titulo.split(" - ")
-        nome_bruto = partes_titulo[0].strip()
-
-        if len(partes_titulo) >= 3:
-            cargo_bruto = partes_titulo[1].strip()
-        else:
-            cargo_bruto = snippet[:80]
-
-        if not eh_nome_pessoa(nome_bruto):
+    for r in resultados:
+        link   = r.get("link", "")
+        titulo = r.get("title", "")
+        if "linkedin.com/in" not in link:
             continue
-
-        partes = nome_bruto.split()
-        if len(partes) < 2 or len(partes[0]) < 3 or len(partes[-1]) < 3:
-            continue
-
-        return nome_bruto, cargo_bruto, link
+        partes = titulo.split(" - ")
+        nome = partes[0].strip()
+        if eh_nome_pessoa(nome):
+            cargo = partes[1].strip() if len(partes) >= 2 else ""
+            return nome, cargo, link
 
     return None, None, None
-
-
-def buscar_decisor(nome_busca_original):
-    palavras_nome = [
-        p for p in limpar_texto(nome_busca_original).lower().split()
-        if len(p) > 4 and p not in {"ltda", "brasil", "grupo", "instituto", "hospital", "clinica", "servicos"}
-    ]
-
-    # TENTATIVA 1: ESG / Sustentabilidade / Relacoes Institucionais
-    query_esg = (
-        f'"{nome_busca_original}" "ESG" OR "Sustentabilidade" OR '
-        f'"Relacoes Institucionais" OR "Responsabilidade Social" OR '
-        f'"Investimento Social" OR "Impacto" OR "Comunicacao" '
-        f'site:linkedin.com/in'
-    )
-    nome, cargo, link = _extrair_decisor(serpapi_search(query_esg), palavras_nome)
-    if nome:
-        return nome, cargo, link
-
-    # TENTATIVA 2: executivo geral
-    query_exec = (
-        f'"{nome_busca_original}" "Diretor" OR "Diretora" OR "CEO" OR '
-        f'"Presidente" OR "Socio" OR "Gerente" OR "Head" '
-        f'site:linkedin.com/in'
-    )
-    nome, cargo, link = _extrair_decisor(serpapi_search(query_exec), palavras_nome)
-    return nome, cargo, link
-
-
-def gerar_email_provavel(nome_decisor, dominio):
-    if not nome_decisor or not dominio:
-        return None
-    partes = limpar_texto(nome_decisor).lower().split()
-    if len(partes) < 2 or len(partes[0]) < 3 or len(partes[-1]) < 3:
-        return None
-    return f"{partes[0]}.{partes[-1]}@{dominio}"
 
 
 def verificar_email(email):
@@ -283,10 +328,27 @@ async def processar_csv(file: UploadFile = File(...)):
         linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(nome_busca, cnpj)
         dominio_tem_mx = validar_mx(dominio_oficial)
 
-        nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor(nome_busca)
+        nome_decisor, cargo_decisor, linkedin_decisor, email_hunter = buscar_decisor_hunter(dominio_oficial)
+        fonte_decisor = "hunter" if nome_decisor else ""
 
-        email_previsto = gerar_email_provavel(nome_decisor, dominio_oficial) if dominio_tem_mx else None
-        email_status   = verificar_email(email_previsto) if email_previsto else "sem email"
+        if not nome_decisor:
+            nome_decisor, cargo_decisor, linkedin_decisor = buscar_decisor_serpapi(nome_busca)
+            fonte_decisor = "serpapi" if nome_decisor else ""
+
+        if email_hunter:
+            email_previsto = email_hunter
+            email_status   = "hunter_verified"
+        elif nome_decisor and dominio_tem_mx:
+            partes = limpar_texto(nome_decisor).lower().split()
+            if len(partes) >= 2:
+                email_previsto = f"{partes[0]}.{partes[-1]}@{dominio_oficial}"
+                email_status   = verificar_email(email_previsto)
+            else:
+                email_previsto = ""
+                email_status   = "sem email"
+        else:
+            email_previsto = ""
+            email_status   = "sem email"
 
         resultados.append({
             "empresa":          empresa,
@@ -303,6 +365,7 @@ async def processar_csv(file: UploadFile = File(...)):
             "decisor_linkedin": linkedin_decisor or "",
             "email_previsto":   email_previsto   or "",
             "email_status":     email_status,
+            "fonte_decisor":    fonte_decisor,
         })
 
     df_final = pd.DataFrame(resultados)
