@@ -64,7 +64,7 @@ def nome_simples(nome_empresa):
 
 
 def nome_para_busca(nome_fantasia, empresa):
-    if nome_fantasia and len(nome_fantasia.split()) >= 2:
+    if nome_fantasia and len(nome_fantasia) > 4:
         return nome_fantasia
     return empresa
 
@@ -76,7 +76,8 @@ def eh_nome_pessoa(nome):
         "grupo", "assessoria", "consultoria", "agencia", "gestao",
         "solucoes", "servicos", "comercial", "marketing", "comunicacao",
         "holding", "organicos", "associacao", "cooperativa", "industria",
-        "empresa", "companhia", "ltda", "s/a"
+        "empresa", "companhia", "ltda", "s/a", "manteiga", "laticinios",
+        "aviacao", "quimica", "pier", "cooperativa"
     ]
     if any(p in nome.lower() for p in nao_pessoa):
         return False
@@ -88,7 +89,55 @@ def eh_nome_pessoa(nome):
     return True
 
 
-def buscar_dados_cnpj(cnpj):
+def serpapi_search(query):
+    if not SERPAPI_KEY:
+        return []
+    try:
+        r = requests.get("https://serpapi.com/search", params={
+            "engine": "google",
+            "q": query,
+            "api_key": SERPAPI_KEY,
+            "num": 5
+        }, timeout=15)
+        return r.json().get("organic_results", [])
+    except Exception:
+        return []
+
+
+def extrair_nome_fantasia_do_cnpj(cnpj, razao_social):
+    cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
+    resultados = serpapi_search(cnpj_limpo)
+    razao_lower = limpar_texto(razao_social).lower()
+
+    for r in resultados:
+        titulo  = r.get("title", "")
+        snippet = r.get("snippet", "")
+
+        # Padrao explicito no snippet: "nome fantasia: XPTO"
+        match = re.search(r"nome fantasia[:\s]+([A-Z][A-Z\s]{3,40})", snippet, re.IGNORECASE)
+        if match:
+            candidato = match.group(1).strip().title()
+            if limpar_texto(candidato).lower() not in razao_lower:
+                return candidato
+
+        # Pega primeira parte do titulo antes de " - " ou " em "
+        partes_titulo = re.split(r" - | em ", titulo)
+        if partes_titulo:
+            candidato = partes_titulo[0].strip()
+            candidato_lower = limpar_texto(candidato).lower()
+            if (candidato_lower not in razao_lower and
+                    razao_lower[:10] not in candidato_lower and
+                    len(candidato) > 4 and
+                    not any(x in candidato_lower for x in [
+                        "cnpj", "consulta", "empresa", "dados", "serasa",
+                        "receita", "situacao", "cadastral", "informacoes"
+                    ])):
+                return candidato.title()
+
+    return ""
+
+
+def buscar_dados_cnpj(cnpj, razao_social=""):
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     try:
         r = requests.get(
@@ -107,25 +156,14 @@ def buscar_dados_cnpj(cnpj):
                 f"CEP {d.get('cep','')}"
             )
             nome_fantasia = (d.get("nome_fantasia", "") or "").strip()
+
+            if not nome_fantasia and razao_social:
+                nome_fantasia = extrair_nome_fantasia_do_cnpj(cnpj_limpo, razao_social)
+
             return telefone.strip(), endereco.strip(), d.get("uf", ""), nome_fantasia
     except Exception:
         pass
     return "", "", "", ""
-
-
-def serpapi_search(query):
-    if not SERPAPI_KEY:
-        return []
-    try:
-        r = requests.get("https://serpapi.com/search", params={
-            "engine": "google",
-            "q": query,
-            "api_key": SERPAPI_KEY,
-            "num": 5
-        }, timeout=15)
-        return r.json().get("organic_results", [])
-    except Exception:
-        return []
 
 
 def buscar_linkedin_e_dominio(nome_busca, cnpj):
@@ -137,7 +175,10 @@ def buscar_linkedin_e_dominio(nome_busca, cnpj):
         "leadiq", "apollo", "hunter", "zoominfo", "reclameaqui",
         "valor.com", "exame.com", "infomoney", "serasaexperian",
         "a16z.com", "hibrazilmarket", "onlineempresas", "gov.br",
-        "oecd.org", "compreaviacao.com.br"
+        "oecd.org", "compreaviacao.com.br", "obahortifruti.com.br",
+        "kaeferbrasil.com.br", "casadosdados", "cnpj.biz", "consultascnpj",
+        "situacaocadastral", "numerodozap", "linkana", "econodata",
+        "cnpjbrasil.com", "cnpj.linkana"
     ]
 
     linkedin_empresa = None
@@ -190,7 +231,6 @@ CARGOS_EXECUTIVOS = [
 def buscar_decisor_hunter(dominio):
     if not HUNTER_KEY or not dominio:
         return None, None, None, None
-
     try:
         r = requests.get("https://api.hunter.io/v2/domain-search", params={
             "domain": dominio,
@@ -198,10 +238,8 @@ def buscar_decisor_hunter(dominio):
             "limit": 10,
             "seniority": "executive,director,manager"
         }, timeout=15)
-
         if r.status_code != 200:
             return None, None, None, None
-
         emails = r.json().get("data", {}).get("emails", [])
         if not emails:
             return None, None, None, None
@@ -215,7 +253,6 @@ def buscar_decisor_hunter(dominio):
                     e.get("linkedin", ""),
                     e.get("value", "")
                 )
-
         for e in emails:
             cargo = (e.get("position") or "").lower()
             if any(c in cargo for c in CARGOS_EXECUTIVOS):
@@ -225,7 +262,6 @@ def buscar_decisor_hunter(dominio):
                     e.get("linkedin", ""),
                     e.get("value", "")
                 )
-
         for e in emails:
             if e.get("first_name") and e.get("last_name"):
                 return (
@@ -234,10 +270,8 @@ def buscar_decisor_hunter(dominio):
                     e.get("linkedin", ""),
                     e.get("value", "")
                 )
-
     except Exception:
         pass
-
     return None, None, None, None
 
 
@@ -249,42 +283,19 @@ def buscar_decisor_serpapi(nome_busca):
     query = f"{chave} linkedin"
     resultados = serpapi_search(query)
 
-    for r in resultados:
-        link   = r.get("link", "")
-        titulo = r.get("title", "")
-        if "linkedin.com/in" not in link:
-            continue
-        cargo_lower = titulo.lower()
-        if any(c in cargo_lower for c in CARGOS_PRIORITARIOS):
+    for prioridade in [CARGOS_PRIORITARIOS, CARGOS_EXECUTIVOS, None]:
+        for r in resultados:
+            link   = r.get("link", "")
+            titulo = r.get("title", "")
+            if "linkedin.com/in" not in link:
+                continue
+            if prioridade and not any(c in titulo.lower() for c in prioridade):
+                continue
             partes = titulo.split(" - ")
-            nome = partes[0].strip()
-            cargo = partes[1].strip() if len(partes) >= 2 else ""
+            nome   = partes[0].strip()
+            cargo  = partes[1].strip() if len(partes) >= 2 else ""
             if eh_nome_pessoa(nome):
                 return nome, cargo, link
-
-    for r in resultados:
-        link   = r.get("link", "")
-        titulo = r.get("title", "")
-        if "linkedin.com/in" not in link:
-            continue
-        cargo_lower = titulo.lower()
-        if any(c in cargo_lower for c in CARGOS_EXECUTIVOS):
-            partes = titulo.split(" - ")
-            nome = partes[0].strip()
-            cargo = partes[1].strip() if len(partes) >= 2 else ""
-            if eh_nome_pessoa(nome):
-                return nome, cargo, link
-
-    for r in resultados:
-        link   = r.get("link", "")
-        titulo = r.get("title", "")
-        if "linkedin.com/in" not in link:
-            continue
-        partes = titulo.split(" - ")
-        nome = partes[0].strip()
-        if eh_nome_pessoa(nome):
-            cargo = partes[1].strip() if len(partes) >= 2 else ""
-            return nome, cargo, link
 
     return None, None, None
 
@@ -322,7 +333,7 @@ async def processar_csv(file: UploadFile = File(...)):
         empresa = str(row.get("empresa", "")).strip()
         cnpj    = str(row.get("cnpj", "")).strip()
 
-        telefone, endereco, uf, nome_fantasia = buscar_dados_cnpj(cnpj)
+        telefone, endereco, uf, nome_fantasia = buscar_dados_cnpj(cnpj, empresa)
         nome_busca = nome_para_busca(nome_fantasia, empresa)
 
         linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(nome_busca, cnpj)
