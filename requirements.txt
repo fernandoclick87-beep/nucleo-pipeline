@@ -5,3 +5,4 @@ dnspython==2.6.1
 pandas
 requests==2.32.3
 beautifulsoup4==4.12.3
+python-multipart==0.0.9
