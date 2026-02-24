@@ -14,7 +14,7 @@ ZEROBOUNCE_KEY = os.getenv("ZEROBOUNCE_KEY")
 HUNTER_KEY     = os.getenv("HUNTER_KEY")
 
 # ---------------------------------------------------------------------------
-# Utilitários
+# Utilitários de texto
 # ---------------------------------------------------------------------------
 
 def limpar_texto(texto):
@@ -53,46 +53,91 @@ def validar_mx(dominio):
 
 
 def nome_simples(nome_empresa):
-    """Extrai palavra-chave principal para buscas menos específicas."""
-    ignorar = {
-        "sa", "s/a", "ltda", "ltda.", "s.a", "s.a.", "do", "de", "da", "dos", "das",
-        "brasil", "brasileira", "grupo", "cia", "companhia", "industria",
-        "instituto", "hospital", "clinica", "centro", "fundacao", "associacao",
-        "cooperativa", "servicos", "comercio", "solucoes", "tecnologia",
-        "nacional", "internacional", "produtos", "quimicos", "sistemas",
-        "eletronicos", "seguranca", "industriais"
+    """Remove sufixos legais e stopwords; retorna tokens relevantes concatenados."""
+    if not nome_empresa:
+        return ""
+    STOPWORDS = {
+        "sa", "s/a", "ltda", "ltda.", "s.a", "s.a.", "me", "eireli", "epp",
+        "do", "de", "da", "dos", "das", "e", "em",
+        "brasil", "brasileira", "grupo", "cia", "companhia",
+        "industria", "industrias", "instituto", "hospital", "clinica",
+        "centro", "fundacao", "associacao", "cooperativa",
+        "servicos", "comercio", "solucoes", "tecnologia",
+        "nacional", "internacional", "produtos", "sistemas",
+        "eletronicos", "seguranca", "industriais", "quimicos",
     }
-    partes    = limpar_texto(nome_empresa).lower().split()
-    principais = [p for p in partes if p not in ignorar and len(p) > 3]
-    return principais[0] if principais else (partes[0] if partes else "")
+    partes = limpar_texto(nome_empresa).lower().split()
+    tokens = [p for p in partes if p not in STOPWORDS and len(p) > 3]
+    return " ".join(tokens) if tokens else " ".join(partes)
 
 
 def nome_para_busca(nome_fantasia, empresa):
-    if nome_fantasia and len(nome_fantasia) > 4:
-        return nome_fantasia
-    return empresa
+    if nome_fantasia and len(nome_fantasia.strip()) > 3:
+        return nome_fantasia.strip()
+    return nome_simples(empresa) or empresa
 
 
-def eh_nome_pessoa(nome):
-    """Verifica se uma string parece ser nome humano (não nome de empresa)."""
-    if not nome:
-        return False
-    palavras_empresa = [
-        "grupo", "assessoria", "consultoria", "agencia", "gestao",
-        "solucoes", "servicos", "comercial", "marketing", "comunicacao",
-        "holding", "organicos", "associacao", "cooperativa", "industria",
-        "empresa", "companhia", "ltda", "s/a", "manteiga", "laticinios",
-        "aviacao", "quimica", "pier", "cooperativa", "gmbh", "corp",
-        "international", "engenharia", "tecnologia", "construtora"
-    ]
-    if any(p in nome.lower() for p in palavras_empresa):
-        return False
-    partes = nome.split()
-    if len(partes) < 2:
-        return False
-    if len(partes[0]) < 3 or len(partes[-1]) < 3:
-        return False
-    return True
+def _tokens_empresa(nome):
+    """Tokens de 4+ chars do nome para validação de relevância."""
+    return [t for t in nome_simples(nome).lower().split() if len(t) >= 4]
+
+
+# ---------------------------------------------------------------------------
+# Blacklists de domínio
+# ---------------------------------------------------------------------------
+
+DOMINIOS_BLOQUEADOS = {
+    "youtube.com", "youtu.be", "facebook.com", "fb.com",
+    "instagram.com", "twitter.com", "x.com", "tiktok.com",
+    "linkedin.com", "whatsapp.com", "telegram.org",
+    "scribd.com", "pt.scribd.com", "slideshare.net", "issuu.com",
+    "google.com", "google.com.br", "bing.com", "yahoo.com",
+    "uol.com.br", "globo.com", "r7.com",
+    "wikipedia.org", "wikimedia.org",
+    "brasilapi.com.br", "receitaws.com.br",
+    "receita.fazenda.gov.br", "cnpj.biz", "cnpj.services",
+    "cnpja.com", "cnpjdados.com.br", "cnpjaberto.com.br",
+    "cnpjinfo.com.br", "cnpjagora.com.br", "cnpjbrasil.com.br",
+    "consultasocio.com.br", "situacaocadastral.com.br",
+    "sintegra.gov.br", "transparencia.cc",
+    "informecadastral.com.br", "cadastroempresa.com.br",
+    "diariocidade.com.br", "onlineempresas.com.br",
+    "numerodozap.com.br", "casadosdados.com.br",
+    "jusbrasil.com.br", "escavador.com", "reclameaqui.com.br",
+    "estadao.com.br", "folha.uol.com.br", "exame.com",
+    "valor.com.br", "infomoney.com.br",
+    "rocketreach.co", "contactout.com", "finalscout.com",
+    "zoominfo.com", "apollo.io", "lusha.com", "snov.io",
+    "leadiq.com", "hunter.io", "econodata.com.br",
+    "glassdoor.com", "indeed.com", "catho.com.br",
+    "infojobs.com.br", "vagas.com",
+}
+
+EMAILS_GENERICOS = {
+    "gmail.com", "hotmail.com", "yahoo.com", "yahoo.com.br",
+    "outlook.com", "live.com", "uol.com.br", "bol.com.br",
+    "terra.com.br", "ig.com.br", "globo.com",
+}
+
+
+def dominio_bloqueado(dominio):
+    if not dominio:
+        return True
+    d = dominio.lower().lstrip("www.")
+    if d in DOMINIOS_BLOQUEADOS:
+        return True
+    return any(d.endswith("." + b) for b in DOMINIOS_BLOQUEADOS)
+
+
+def dominio_generico(dominio):
+    if not dominio:
+        return True
+    return dominio.lower().lstrip("www.") in EMAILS_GENERICOS
+
+
+def _extrair_dominio_url(url):
+    m = re.search(r"https?://(?:www\.)?([^/?#]+)", url or "")
+    return m.group(1).lower() if m else ""
 
 
 # ---------------------------------------------------------------------------
@@ -117,346 +162,306 @@ def serpapi_search(query, num=5):
 
 
 # ---------------------------------------------------------------------------
-# BrasilAPI – CNPJ + QSA + email
+# BrasilAPI
 # ---------------------------------------------------------------------------
 
 PRIORIDADE_QSA = {
-    "presidente":            0,
-    "diretor presidente":    1,
-    "diretor":               2,
-    "administrador":         3,
-    "socio-administrador":   4,
-    "socio administrador":   4,
-    "gerente":               5,
-    "socio":                 6,
+    "presidente":          0,
+    "diretor presidente":  1,
+    "diretor":             2,
+    "administrador":       3,
+    "socio-administrador": 4,
+    "socio administrador": 4,
+    "gerente":             5,
+    "socio":               6,
 }
 
+
 def _prioridade_qualificacao(qual):
-    qual_lower = limpar_texto(qual).lower()
+    q = limpar_texto(qual).lower()
     for chave, prio in PRIORIDADE_QSA.items():
-        if chave in qual_lower:
+        if chave in q:
             return prio
     return 99
 
 
 def extrair_pessoas_qsa(qsa_list):
-    """
-    Recebe a lista qsa da BrasilAPI e retorna somente as PESSOAS FÍSICAS,
-    ordenadas por prioridade de cargo (presidente > diretor > administrador ...).
-    Retorna lista de dicts: {'nome': ..., 'qualificacao': ...}
-    """
+    TERMOS_PJ = {
+        "ltda", "s/a", "s.a", "eireli", "holding", "participacoes",
+        "investimentos", "empreendimentos", "international", "engenharia",
+        "tecnologia", "construtora", "servicos", "comercio", "industria",
+        "group", "grupo", "gmbh", "corp", "inc",
+    }
     pessoas = []
     for item in (qsa_list or []):
-        nome  = (item.get("nome_socio") or "").strip()
-        qual  = (item.get("qualificacao_socio") or "").strip()
-        cpf   = re.sub(r"\D", "", item.get("cnpj_cpf_do_socio") or "")
-
-        # Ignora entidades: CNPJ (14 dígitos) ou nome claramente não-humano
-        if len(cpf) == 14:
+        nome = limpar_texto(item.get("nome_socio") or "").strip()
+        qual = limpar_texto(item.get("qualificacao_socio") or "").strip()
+        doc  = re.sub(r"\D", "", item.get("cnpj_cpf_do_socio") or "")
+        if len(doc) == 14:
             continue
-        if not eh_nome_pessoa(nome):
+        if any(t in nome.lower() for t in TERMOS_PJ):
             continue
-
+        if not nome or len(nome.split()) < 2:
+            continue
         pessoas.append({
-            "nome":         nome.title(),
+            "nome":        nome.title(),
             "qualificacao": qual,
-            "prioridade":   _prioridade_qualificacao(qual),
+            "prioridade":  _prioridade_qualificacao(qual),
         })
-
     pessoas.sort(key=lambda x: x["prioridade"])
     return pessoas
 
 
 def buscar_dados_cnpj(cnpj, razao_social=""):
-    """
-    Retorna: (telefone, endereco, uf, nome_fantasia, email_empresa, pessoas_qsa)
-    pessoas_qsa = lista de {'nome', 'qualificacao', 'prioridade'}
-    """
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     try:
         r = requests.get(
             f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}",
             timeout=10
         )
-        if r.status_code == 200:
-            d = r.json()
-
-            telefone = d.get("ddd_telefone_1", "")
-            if telefone:
-                t = re.sub(r"\D", "", telefone)
-                telefone = f"({t[:2]}) {t[2:]}" if len(t) >= 10 else t
-
-            endereco = (
-                f"{d.get('logradouro','')}, {d.get('numero','')} - "
-                f"{d.get('bairro','')}, {d.get('municipio','')}/{d.get('uf','')} - "
-                f"CEP {d.get('cep','')}"
-            )
-
-            nome_fantasia  = (d.get("nome_fantasia", "") or "").strip()
-            email_empresa  = (d.get("email", "") or "").strip().lower()
-            pessoas_qsa    = extrair_pessoas_qsa(d.get("qsa", []))
-
-            return (
-                telefone.strip(),
-                endereco.strip(),
-                d.get("uf", ""),
-                nome_fantasia,
-                email_empresa,
-                pessoas_qsa,
-            )
+        if r.status_code != 200:
+            return "", "", "", "", "", []
+        d = r.json()
+        t = re.sub(r"\D", "", d.get("ddd_telefone_1", "") or "")
+        telefone = f"({t[:2]}) {t[2:]}" if len(t) >= 10 else t
+        partes_end = [
+            f"{d.get('logradouro','')}, {d.get('numero','')}".strip(", "),
+            d.get("bairro", "") or "",
+            f"{d.get('municipio','')}/{d.get('uf','')} - CEP {d.get('cep','')}",
+        ]
+        endereco = " - ".join(p for p in partes_end if p.strip(" -/"))
+        nome_fantasia = limpar_texto(d.get("nome_fantasia") or "")
+        email_empresa = limpar_texto(d.get("email") or "").lower()
+        pessoas_qsa   = extrair_pessoas_qsa(d.get("qsa", []))
+        return telefone.strip(), endereco.strip(), d.get("uf", ""), nome_fantasia, email_empresa, pessoas_qsa
     except Exception:
-        pass
-    return "", "", "", "", "", []
+        return "", "", "", "", "", []
 
 
 # ---------------------------------------------------------------------------
-# LinkedIn + domínio via SerpAPI
+# CAMADA 1 — Domínio oficial
 # ---------------------------------------------------------------------------
 
-IGNORAR_DOMINIO = {
-    "linkedin", "facebook", "instagram", "receitafederal",
-    "cnpj.info", "empresas.net", "econodata", "jusbrasil",
-    "tabelasalarios", "wikipedia", "google", "brasilapi",
-    "glassdoor", "indeed", "catho", "infojobs", "mercadolivre",
-    "leadiq", "apollo", "hunter.io", "zoominfo", "reclameaqui",
-    "valor.com", "exame.com", "infomoney", "serasaexperian",
-    "a16z.com", "hibrazilmarket", "onlineempresas", "gov.br",
-    "oecd.org", "compreaviacao.com.br", "obahortifruti.com.br",
-    "kaeferbrasil.com.br", "casadosdados", "cnpj.biz", "consultascnpj",
-    "situacaocadastral", "numerodozap", "linkana", "cnpjbrasil",
-    "portaldaindustria", "look2agro", "mitel.com", "econodata",
-    "consultasocio", "transparencia.cc", "rocketreach", "contactout",
-    "finalscout", "zoominfo", "cnpj.services", "informecadastral",
-    "cadastroempresa", "diariocidade", "cnpjagora"
-}
-
-
-def buscar_linkedin_e_dominio(nome_busca, cnpj):
-    """Busca LinkedIn de empresa e domínio oficial."""
-    linkedin_empresa = None
-    dominio_oficial  = None
-    chave = nome_simples(nome_busca)
+def resolver_dominio(nome_busca, cnpj, email_empresa):
+    """
+    1. Email BrasilAPI (mais confiável)
+    2. SerpAPI por nome com validação por tokens
+    3. SerpAPI por CNPJ com validação por tokens
+    """
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
+    tokens = _tokens_empresa(nome_busca)
 
-    # Busca 1: pelo CNPJ (mais específica, menos ruído)
-    for r in serpapi_search(f"{cnpj_limpo} linkedin site oficial", num=5):
+    # 1. Email BrasilAPI
+    if email_empresa and "@" in email_empresa:
+        d = email_empresa.split("@")[-1].strip()
+        if not dominio_generico(d) and not dominio_bloqueado(d):
+            return d, "brasilapi_email"
+
+    # 2. SerpAPI por nome
+    for query in [
+        f'"{nome_busca}" site oficial',
+        f'"{nome_busca}" contato',
+    ]:
+        for r in serpapi_search(query, num=5):
+            link = r.get("link", "")
+            d = _extrair_dominio_url(link)
+            if not d or dominio_bloqueado(d):
+                continue
+            if tokens and any(t in d for t in tokens):
+                return d, "serpapi_nome"
+
+    # 3. SerpAPI por CNPJ
+    for r in serpapi_search(f"{cnpj_limpo} site oficial", num=5):
         link = r.get("link", "")
-        if not linkedin_empresa and "linkedin.com/company" in link:
-            linkedin_empresa = link
-        if not dominio_oficial and link:
-            if not any(i in link.lower() for i in IGNORAR_DOMINIO):
-                m = re.search(r"https?://(?:www\.)?([^/]+)", link)
-                if m:
-                    dominio_oficial = m.group(1)
-        if linkedin_empresa and dominio_oficial:
-            break
+        d = _extrair_dominio_url(link)
+        if not d or dominio_bloqueado(d):
+            continue
+        if tokens and any(t in d for t in tokens):
+            return d, "serpapi_cnpj"
 
-    # Busca 2: pelo nome (fallback)
-    if not linkedin_empresa or not dominio_oficial:
-        for r in serpapi_search(f"{nome_busca} site oficial linkedin empresa", num=5):
-            link     = r.get("link", "")
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# CAMADA 2 — LinkedIn de empresa
+# ---------------------------------------------------------------------------
+
+def buscar_linkedin_empresa(nome_busca, cnpj):
+    """
+    Aceita apenas linkedin.com/company com tokens do nome na URL ou contexto.
+    """
+    cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
+    tokens = _tokens_empresa(nome_busca)
+
+    for query in [
+        f'"{nome_busca}" site:linkedin.com/company',
+        f'{nome_busca} linkedin empresa',
+    ]:
+        for r in serpapi_search(query, num=5):
+            link = r.get("link", "")
+            if "linkedin.com/company" not in link:
+                continue
             contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
-            if not linkedin_empresa and "linkedin.com/company" in link:
-                if chave in link.lower() or chave in contexto:
-                    linkedin_empresa = link
-            if not dominio_oficial and link:
-                if not any(i in link.lower() for i in IGNORAR_DOMINIO):
-                    m = re.search(r"https?://(?:www\.)?([^/]+)", link)
-                    if m:
-                        dominio_oficial = m.group(1)
-            if linkedin_empresa and dominio_oficial:
-                break
+            if tokens and any(t in link.lower() or t in contexto for t in tokens):
+                return link
 
-    return linkedin_empresa, dominio_oficial
+    # Fallback: CNPJ direto
+    for r in serpapi_search(f"{cnpj_limpo} site:linkedin.com/company", num=3):
+        link = r.get("link", "")
+        if "linkedin.com/company" in link:
+            return link
+
+    return None
 
 
 # ---------------------------------------------------------------------------
-# QSA-first: busca LinkedIn de pessoa específica
+# CAMADA 3 — Decisor via QSA + LinkedIn
 # ---------------------------------------------------------------------------
 
-def _extrair_dominio_da_url(url):
-    m = re.search(r"https?://(?:www\.)?([^/]+)", url or "")
-    return m.group(1) if m else ""
+def _extrair_cargo_do_titulo(titulo, nome_pessoa):
+    partes = titulo.split(" - ")
+    if len(partes) >= 2:
+        cargo = partes[1].strip()
+        cargo = re.sub(r"\s*\|\s*LinkedIn.*", "", cargo).strip()
+        primeiro = limpar_texto(nome_pessoa).lower().split()[0]
+        if cargo and primeiro not in cargo.lower():
+            return cargo
+    return ""
 
 
 def buscar_decisor_via_qsa(pessoas_qsa, nome_busca):
     """
-    Para cada pessoa do QSA, busca LinkedIn com query específica:
-    "{nome_pessoa}" "{empresa_simples}" linkedin
-
-    Retorna (nome, cargo, linkedin_url) do primeiro match válido,
-    ou (None, None, None) se não encontrar.
+    QSA-first: para cada pessoa (top 3), busca LinkedIn em cascata:
+    1. Nome completo + empresa (query exata)
+    2. Nome curto (primeiro+último) + empresa
+    3. Nome curto + empresa simples (sem aspas, mais amplo)
     """
     if not pessoas_qsa:
         return None, None, None
 
-    empresa_simples = nome_simples(nome_busca)
+    nome_busca_simples = nome_simples(nome_busca)
 
-    for pessoa in pessoas_qsa[:3]:  # testa os 3 mais importantes
-        nome_pessoa = pessoa["nome"]
-        qualificacao = pessoa["qualificacao"]
+    for pessoa in pessoas_qsa[:3]:
+        nome_completo = pessoa["nome"]
+        qualificacao  = pessoa["qualificacao"]
 
-        # Query cirúrgica: nome exato + empresa
-        query = f'"{nome_pessoa}" "{nome_busca}" site:linkedin.com/in'
-        resultados = serpapi_search(query, num=3)
+        partes   = limpar_texto(nome_completo).lower().split()
+        primeiro = partes[0] if partes else ""
+        ultimo   = partes[-1] if len(partes) > 1 else ""
+        nome_curto = f"{partes[0].title()} {partes[-1].title()}" if len(partes) > 1 else nome_completo
 
-        # Fallback: nome + empresa simples sem site:
-        if not any("linkedin.com/in" in r.get("link", "") for r in resultados):
-            query = f'"{nome_pessoa}" "{empresa_simples}" linkedin'
-            resultados = serpapi_search(query, num=5)
+        queries = [
+            f'"{nome_completo}" "{nome_busca}" site:linkedin.com/in',
+            f'"{nome_curto}" "{nome_busca}" site:linkedin.com/in',
+            f'"{nome_curto}" "{nome_busca_simples}" linkedin',
+        ]
 
-        for r in resultados:
-            link = r.get("link", "")
-            if "linkedin.com/in" not in link:
-                continue
-            titulo = r.get("title", "")
-            # Validação básica: nome ou empresa devem aparecer no título/snippet
-            contexto = (titulo + " " + r.get("snippet", "")).lower()
-            nome_lower = limpar_texto(nome_pessoa).lower()
-            primeiro_nome = nome_lower.split()[0] if nome_lower else ""
-            sobrenome     = nome_lower.split()[-1] if len(nome_lower.split()) > 1 else ""
-
-            # Aceita se primeiro nome OU sobrenome aparece no contexto
-            if primeiro_nome in contexto or sobrenome in contexto:
-                cargo_encontrado = _extrair_cargo_do_titulo(titulo, nome_pessoa) or qualificacao
-                return nome_pessoa, cargo_encontrado, link
+        for query in queries:
+            for r in serpapi_search(query, num=5):
+                link = r.get("link", "")
+                if "linkedin.com/in" not in link:
+                    continue
+                titulo   = r.get("title", "")
+                contexto = (titulo + " " + r.get("snippet", "")).lower()
+                if primeiro in contexto or ultimo in contexto:
+                    cargo = _extrair_cargo_do_titulo(titulo, nome_completo) or qualificacao
+                    return nome_completo, cargo, link
 
     return None, None, None
 
 
-def _extrair_cargo_do_titulo(titulo, nome_pessoa):
-    """
-    Títulos LinkedIn têm formato: "Nome Sobrenome - Cargo - Empresa | LinkedIn"
-    Tenta extrair o cargo.
-    """
-    nome_lower = limpar_texto(nome_pessoa).lower().split()[0]
-    partes = titulo.split(" - ")
-    if len(partes) >= 2:
-        # partes[0] = nome, partes[1] = cargo, partes[2] = empresa (às vezes)
-        candidato_cargo = partes[1].strip() if len(partes) >= 2 else ""
-        if candidato_cargo and nome_lower not in candidato_cargo.lower():
-            # Remove " | LinkedIn" se presente
-            candidato_cargo = re.sub(r"\s*\|\s*LinkedIn.*", "", candidato_cargo).strip()
-            return candidato_cargo
-    return ""
-
-
 # ---------------------------------------------------------------------------
-# Hunter.io
+# CAMADA 4 — Hunter.io
 # ---------------------------------------------------------------------------
 
-CARGOS_PRIORITARIOS = [
-    "esg", "sustentabilidade", "sustainability", "relacoes institucionais",
-    "responsabilidade social", "investimento social", "impacto social",
-    "comunicacao", "marketing", "patrocinio"
-]
-CARGOS_EXECUTIVOS = [
-    "ceo", "coo", "cfo", "presidente", "vice-presidente", "vice presidente",
-    "diretor", "diretora", "director", "socio", "gerente", "head", "manager"
-]
+CARGOS_ALVO_HUNTER = {
+    "ceo", "cfo", "coo", "diretor", "director", "vp", "presidente",
+    "gerente", "manager", "head", "esg", "sustentabilidade",
+    "marketing", "comunicacao", "comunicação", "rh", "recursos humanos",
+    "pessoas", "social", "financeiro",
+}
 
 
 def buscar_decisor_hunter(dominio):
     if not HUNTER_KEY or not dominio:
         return None, None, None, None
     try:
-        r = requests.get("https://api.hunter.io/v2/domain-search", params={
-            "domain":   dominio,
-            "api_key":  HUNTER_KEY,
-            "limit":    10,
-            "seniority": "executive,director,manager"
-        }, timeout=15)
-        if r.status_code != 200:
-            return None, None, None, None
+        r = requests.get(
+            "https://api.hunter.io/v2/domain-search",
+            params={"domain": dominio, "api_key": HUNTER_KEY, "limit": 10},
+            timeout=10,
+        )
         emails = r.json().get("data", {}).get("emails", [])
-        if not emails:
-            return None, None, None, None
-
-        for prioridade_lista in [CARGOS_PRIORITARIOS, CARGOS_EXECUTIVOS, None]:
-            for e in emails:
-                cargo = (e.get("position") or "").lower()
-                if prioridade_lista and not any(c in cargo for c in prioridade_lista):
-                    continue
-                if e.get("first_name") and e.get("last_name"):
-                    return (
-                        f"{e.get('first_name','')} {e.get('last_name','')}".strip(),
-                        e.get("position", ""),
-                        e.get("linkedin", ""),
-                        e.get("value", "")
-                    )
+        for e in emails:
+            cargo = (e.get("position") or "").lower()
+            if any(c in cargo for c in CARGOS_ALVO_HUNTER):
+                nome = f"{e.get('first_name','')} {e.get('last_name','')}".strip()
+                return nome or None, e.get("position"), e.get("linkedin") or None, e.get("value") or None
+        if emails:
+            e = emails[0]
+            nome = f"{e.get('first_name','')} {e.get('last_name','')}".strip()
+            return nome or None, e.get("position"), e.get("linkedin") or None, e.get("value") or None
     except Exception:
         pass
     return None, None, None, None
 
 
 # ---------------------------------------------------------------------------
-# SerpAPI fallback (busca genérica por empresa – último recurso)
+# CAMADA 5 — SerpAPI genérico (último recurso)
 # ---------------------------------------------------------------------------
 
 def buscar_decisor_serpapi_generico(nome_busca):
-    """Fallback: busca genérica por cargo+empresa quando QSA e Hunter falham."""
-    chave = nome_simples(nome_busca)
-    if not chave:
-        return None, None, None
-
-    resultados = serpapi_search(f"{chave} linkedin", num=7)
-
-    for prioridade in [CARGOS_PRIORITARIOS, CARGOS_EXECUTIVOS, None]:
-        for r in resultados:
-            link   = r.get("link", "")
-            titulo = r.get("title", "")
+    TERMOS_PJ = {
+        "ltda", "s/a", "holding", "group", "grupo", "gmbh", "corp",
+        "engenharia", "tecnologia", "construtora", "servicos",
+    }
+    for query in [
+        f"{nome_busca} diretor linkedin",
+        f"{nome_busca} CEO linkedin",
+    ]:
+        for r in serpapi_search(query, num=5):
+            link = r.get("link", "")
             if "linkedin.com/in" not in link:
                 continue
-            if prioridade and not any(c in titulo.lower() for c in prioridade):
-                continue
+            titulo = r.get("title", "")
             partes = titulo.split(" - ")
-            nome   = partes[0].strip()
-            cargo  = partes[1].strip() if len(partes) >= 2 else ""
-            # Remove " | LinkedIn" do cargo
-            cargo  = re.sub(r"\s*\|\s*LinkedIn.*", "", cargo).strip()
-            if eh_nome_pessoa(nome):
-                return nome, cargo, link
-
+            if len(partes) < 2:
+                continue
+            candidato = partes[0].strip()
+            if any(t in candidato.lower() for t in TERMOS_PJ):
+                continue
+            if len(candidato.split()) < 2 or len(candidato) < 6:
+                continue
+            cargo = _extrair_cargo_do_titulo(titulo, candidato)
+            return candidato, cargo or "", link
     return None, None, None
 
 
 # ---------------------------------------------------------------------------
-# Verificação de email
+# Email
 # ---------------------------------------------------------------------------
+
+def construir_email(nome_decisor, dominio):
+    if not nome_decisor or not dominio:
+        return ""
+    partes = limpar_texto(nome_decisor).lower().split()
+    if len(partes) == 1:
+        return f"{partes[0]}@{dominio}"
+    return f"{partes[0]}.{partes[-1]}@{dominio}"
+
 
 def verificar_email(email):
     if not ZEROBOUNCE_KEY or not email:
-        return "nao verificado"
+        return "nao_verificado"
     try:
         r = requests.get(
             "https://api.zerobounce.net/v2/validate",
-            params={"api_key": ZEROBOUNCE_KEY, "email": email, "ip_address": ""},
-            timeout=10
+            params={"api_key": ZEROBOUNCE_KEY, "email": email},
+            timeout=10,
         )
-        if r.status_code == 200:
-            return r.json().get("status", "unknown")
+        return r.json().get("status", "unknown")
     except Exception:
-        pass
-    return "unknown"
-
-
-def construir_email(nome_decisor, dominio, email_empresa_brasilapi):
-    """
-    Tenta construir email do decisor.
-    1. Se temos email da empresa via BrasilAPI → extrai domínio
-    2. Usa o dominio_oficial para email nome.sobrenome@dominio
-    """
-    dominio_email = dominio
-    if email_empresa_brasilapi:
-        partes_email = email_empresa_brasilapi.split("@")
-        if len(partes_email) == 2:
-            dominio_email = partes_email[1]
-
-    if nome_decisor and dominio_email:
-        partes = limpar_texto(nome_decisor).lower().split()
-        if len(partes) >= 2:
-            return f"{partes[0]}.{partes[-1]}@{dominio_email}"
-    return ""
+        return "erro_verificacao"
 
 
 # ---------------------------------------------------------------------------
@@ -480,44 +485,48 @@ async def processar_csv(file: UploadFile = File(...)):
         empresa = str(row.get("empresa", "")).strip()
         cnpj    = str(row.get("cnpj", "")).strip()
 
-        # 1. BrasilAPI: dados cadastrais + QSA + email empresa
+        # CAMADA 0: BrasilAPI
         telefone, endereco, uf, nome_fantasia, email_empresa, pessoas_qsa = \
             buscar_dados_cnpj(cnpj, empresa)
 
         nome_busca = nome_para_busca(nome_fantasia, empresa)
 
-        # 2. LinkedIn de empresa + domínio oficial
-        linkedin_empresa, dominio_oficial = buscar_linkedin_e_dominio(nome_busca, cnpj)
-        dominio_tem_mx = validar_mx(dominio_oficial)
+        # CAMADA 1: Domínio (email BrasilAPI > SerpAPI validado por tokens)
+        dominio_oficial, _ = resolver_dominio(nome_busca, cnpj, email_empresa)
+        dominio_tem_mx      = validar_mx(dominio_oficial)
 
-        # 3. Decisor: QSA-first (melhor qualidade)
+        # CAMADA 2: LinkedIn empresa (validado por tokens do nome)
+        linkedin_empresa = buscar_linkedin_empresa(nome_busca, cnpj)
+
+        # CAMADA 3: Decisor via QSA + LinkedIn
         nome_decisor, cargo_decisor, linkedin_decisor = \
             buscar_decisor_via_qsa(pessoas_qsa, nome_busca)
         fonte_decisor = "qsa+linkedin" if nome_decisor else ""
 
-        # 4. Decisor: Hunter.io (bom para email + cargo real)
+        # CAMADA 4: Hunter (só com domínio confiável)
         email_hunter = None
-        if not nome_decisor:
-            nome_decisor, cargo_decisor, linkedin_decisor, email_hunter = \
-                buscar_decisor_hunter(dominio_oficial)
-            if nome_decisor:
-                fonte_decisor = "hunter"
-        else:
-            # Mesmo achando via QSA, busca email via Hunter se possível
-            _, _, _, email_hunter = buscar_decisor_hunter(dominio_oficial)
+        if dominio_oficial and not dominio_generico(dominio_oficial):
+            if not nome_decisor:
+                nome_decisor, cargo_decisor, linkedin_decisor, email_hunter = \
+                    buscar_decisor_hunter(dominio_oficial)
+                if nome_decisor:
+                    fonte_decisor = "hunter"
+            else:
+                _, _, _, email_hunter = buscar_decisor_hunter(dominio_oficial)
 
-        # 5. Decisor: SerpAPI genérico (fallback)
+        # CAMADA 5: SerpAPI genérico (fallback final)
         if not nome_decisor:
             nome_decisor, cargo_decisor, linkedin_decisor = \
                 buscar_decisor_serpapi_generico(nome_busca)
-            fonte_decisor = "serpapi" if nome_decisor else ""
+            if nome_decisor:
+                fonte_decisor = "serpapi"
 
-        # 6. Email
+        # Email final
         if email_hunter:
             email_previsto = email_hunter
             email_status   = "hunter_verified"
         else:
-            email_previsto = construir_email(nome_decisor, dominio_oficial, email_empresa)
+            email_previsto = construir_email(nome_decisor, dominio_oficial)
             if email_previsto and dominio_tem_mx:
                 email_status = verificar_email(email_previsto)
             elif email_previsto:
@@ -526,7 +535,6 @@ async def processar_csv(file: UploadFile = File(...)):
                 email_previsto = ""
                 email_status   = "sem email"
 
-        # QSA como referência – primeiro nome para auditoria
         qsa_referencia = " | ".join(
             f"{p['nome']} ({p['qualificacao']})" for p in pessoas_qsa[:2]
         ) if pessoas_qsa else ""
