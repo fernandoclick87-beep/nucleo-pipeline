@@ -288,7 +288,9 @@ def resolver_dominio(nome_busca, cnpj, email_empresa):
 
 def buscar_linkedin_empresa(nome_busca, cnpj):
     """
-    Aceita apenas linkedin.com/company com tokens do nome na URL ou contexto.
+    Aceita apenas linkedin.com/company com tokens do nome na URL.
+    Contexto (snippet) não é suficiente — evita falsos positivos como /company/agrocana para Cooper A1.
+    Exceção: se tokens estiver vazio (empresa com nome muito curto), aceita qualquer /company.
     """
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     tokens = _tokens_empresa(nome_busca)
@@ -301,11 +303,17 @@ def buscar_linkedin_empresa(nome_busca, cnpj):
             link = r.get("link", "")
             if "linkedin.com/company" not in link:
                 continue
-            contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
-            if tokens and any(t in link.lower() or t in contexto for t in tokens):
-                return link
+            # Se tokens disponíveis: exigir token na URL
+            if tokens:
+                if any(t in link.lower() for t in tokens):
+                    return link
+            else:
+                # Sem tokens (GPS TEC, siglas): aceitar com validação por contexto
+                contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
+                if any(t in contexto for t in limpar_texto(nome_busca).lower().split() if len(t) > 2):
+                    return link
 
-    # Fallback: CNPJ direto
+    # Fallback: CNPJ direto (sem exigência de token — CNPJ já é âncora suficiente)
     for r in serpapi_search(f"{cnpj_limpo} site:linkedin.com/company", num=3):
         link = r.get("link", "")
         if "linkedin.com/company" in link:
@@ -318,28 +326,52 @@ def buscar_linkedin_empresa(nome_busca, cnpj):
 # CAMADA 3 — Decisor via QSA + LinkedIn
 # ---------------------------------------------------------------------------
 
-def _extrair_cargo_do_titulo(titulo, nome_pessoa):
+def _extrair_cargo_do_titulo(titulo, nome_pessoa, nome_empresa=""):
+    """
+    Extrai cargo do padrão "Nome Pessoa - Cargo | LinkedIn".
+    Rejeita se o texto após o traço parece nome de empresa (tokens da empresa presentes).
+    """
     partes = titulo.split(" - ")
     if len(partes) >= 2:
         cargo = partes[1].strip()
         cargo = re.sub(r"\s*\|\s*LinkedIn.*", "", cargo).strip()
         primeiro = limpar_texto(nome_pessoa).lower().split()[0]
-        if cargo and primeiro not in cargo.lower():
+        # Rejeitar se cargo é o próprio nome da pessoa
+        if primeiro in cargo.lower():
+            return ""
+        # Rejeitar se cargo contém tokens do nome da empresa (é o nome da empresa, não cargo)
+        if nome_empresa:
+            tokens_emp = _tokens_empresa(nome_empresa)
+            if tokens_emp and any(t in cargo.lower() for t in tokens_emp):
+                return ""
+        # Rejeitar sufixos legais comuns (indicam que é razão social, não cargo)
+        sufixos = {"ltda", "s/a", "s.a", "eireli", "me ", " sa"}
+        if any(s in cargo.lower() for s in sufixos):
+            return ""
+        if cargo:
             return cargo
     return ""
 
 
-def buscar_decisor_via_qsa(pessoas_qsa, nome_busca):
+def buscar_decisor_via_qsa(pessoas_qsa, nome_busca, dominio_oficial=None):
     """
     QSA-first: para cada pessoa (top 3), busca LinkedIn em cascata:
     1. Nome completo + empresa (query exata)
     2. Nome curto (primeiro+último) + empresa
     3. Nome curto + empresa simples (sem aspas, mais amplo)
+    4. Nome curto + nome extraído do domínio (para subsidiárias)
     """
     if not pessoas_qsa:
         return None, None, None
 
     nome_busca_simples = nome_simples(nome_busca)
+
+    # Extrai hint do domínio (ex: "kaefer.com" → "kaefer") para subsidiárias
+    nome_dominio = ""
+    if dominio_oficial:
+        partes_dom = dominio_oficial.lower().replace("www.", "").split(".")[0]
+        if len(partes_dom) > 3 and partes_dom not in nome_busca_simples.lower():
+            nome_dominio = partes_dom
 
     for pessoa in pessoas_qsa[:3]:
         nome_completo = pessoa["nome"]
@@ -356,6 +388,10 @@ def buscar_decisor_via_qsa(pessoas_qsa, nome_busca):
             f'"{nome_curto}" "{nome_busca_simples}" linkedin',
         ]
 
+        # Adiciona busca com domínio como hint de empresa (subsidiárias tipo Rip/Kaefer)
+        if nome_dominio:
+            queries.append(f'"{nome_curto}" "{nome_dominio}" site:linkedin.com/in')
+
         for query in queries:
             for r in serpapi_search(query, num=5):
                 link = r.get("link", "")
@@ -364,7 +400,7 @@ def buscar_decisor_via_qsa(pessoas_qsa, nome_busca):
                 titulo   = r.get("title", "")
                 contexto = (titulo + " " + r.get("snippet", "")).lower()
                 if primeiro in contexto or ultimo in contexto:
-                    cargo = _extrair_cargo_do_titulo(titulo, nome_completo) or qualificacao
+                    cargo = _extrair_cargo_do_titulo(titulo, nome_completo, nome_busca) or qualificacao
                     return nome_completo, cargo, link
 
     return None, None, None
@@ -432,7 +468,7 @@ def buscar_decisor_serpapi_generico(nome_busca):
                 continue
             if len(candidato.split()) < 2 or len(candidato) < 6:
                 continue
-            cargo = _extrair_cargo_do_titulo(titulo, candidato)
+            cargo = _extrair_cargo_do_titulo(titulo, candidato, nome_busca)
             return candidato, cargo or "", link
     return None, None, None
 
@@ -500,7 +536,7 @@ async def processar_csv(file: UploadFile = File(...)):
 
         # CAMADA 3: Decisor via QSA + LinkedIn
         nome_decisor, cargo_decisor, linkedin_decisor = \
-            buscar_decisor_via_qsa(pessoas_qsa, nome_busca)
+            buscar_decisor_via_qsa(pessoas_qsa, nome_busca, dominio_oficial)
         fonte_decisor = "qsa+linkedin" if nome_decisor else ""
 
         # CAMADA 4: Hunter (só com domínio confiável)
