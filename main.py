@@ -126,10 +126,11 @@ def dominio_generico(dominio):
 
 
 # ---------------------------------------------------------------------------
-# SerpAPI
+# SerpAPI — 1 call, retorna primeiro resultado válido
 # ---------------------------------------------------------------------------
 
 def serpapi_search(query, num=5):
+    """1 call ao SerpAPI. Retorna lista de organic_results."""
     if not SERPAPI_KEY:
         return []
     try:
@@ -147,7 +148,7 @@ def serpapi_search(query, num=5):
 
 
 # ---------------------------------------------------------------------------
-# BrasilAPI
+# BrasilAPI — grátis, sem SerpAPI
 # ---------------------------------------------------------------------------
 
 PRIORIDADE_QSA = {
@@ -198,6 +199,7 @@ def extrair_pessoas_qsa(qsa_list):
 
 
 def buscar_dados_cnpj(cnpj):
+    """Grátis. Retorna telefone, nome_fantasia, email, uf, pessoas_qsa."""
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
     try:
         r = requests.get(
@@ -208,7 +210,7 @@ def buscar_dados_cnpj(cnpj):
             return "", "", "", "", []
         d = r.json()
         t = re.sub(r"\D", "", d.get("ddd_telefone_1", "") or "")
-        telefone = f"({t[:2]}) {t[2:]}" if len(t) >= 10 else t
+        telefone      = f"({t[:2]}) {t[2:]}" if len(t) >= 10 else t
         nome_fantasia = limpar_texto(d.get("nome_fantasia") or "")
         email_empresa = limpar_texto(d.get("email") or "").lower()
         pessoas_qsa   = extrair_pessoas_qsa(d.get("qsa", []))
@@ -218,73 +220,50 @@ def buscar_dados_cnpj(cnpj):
 
 
 # ---------------------------------------------------------------------------
-# Site da empresa
+# Site — GRÁTIS via email da BrasilAPI (sem SerpAPI)
 # ---------------------------------------------------------------------------
 
-def resolver_dominio(nome_busca, cnpj, email_empresa):
-    cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
-    tokens = _tokens_empresa(nome_busca)
-
-    # 1. Email BrasilAPI
+def resolver_site_gratis(email_empresa):
+    """Extrai domínio do email da BrasilAPI. Zero créditos SerpAPI."""
     if email_empresa and "@" in email_empresa:
         d = email_empresa.split("@")[-1].strip()
         if not dominio_generico(d) and not dominio_bloqueado(d):
             return d
-
-    # 2. SerpAPI por nome
-    for query in [
-        f'"{nome_busca}" site oficial',
-        f'"{nome_busca}" contato',
-        f'{nome_busca} site oficial',
-    ]:
-        for r in serpapi_search(query, num=5):
-            link = r.get("link", "")
-            d = _extrair_dominio_url(link)
-            if not d or dominio_bloqueado(d):
-                continue
-            if not tokens or any(t in d for t in tokens):
-                return d
-
-    # 3. SerpAPI por CNPJ
-    for r in serpapi_search(f"{cnpj_limpo} site oficial", num=5):
-        link = r.get("link", "")
-        d = _extrair_dominio_url(link)
-        if not d or dominio_bloqueado(d):
-            continue
-        if not tokens or any(t in d for t in tokens):
-            return d
-
     return ""
 
 
 # ---------------------------------------------------------------------------
-# LinkedIn empresa
+# CALL 1 — LinkedIn empresa (1 crédito SerpAPI)
 # ---------------------------------------------------------------------------
 
 def buscar_linkedin_empresa(nome_busca, cnpj):
+    """
+    Usa exatamente 1 call SerpAPI.
+    Valida token do nome na URL. Fallback por CNPJ no mesmo call.
+    """
     cnpj_limpo = re.sub(r"\D", "", str(cnpj)).zfill(14)
-    tokens = _tokens_empresa(nome_busca)
+    tokens     = _tokens_empresa(nome_busca)
 
-    for query in [
-        f'"{nome_busca}" site:linkedin.com/company',
-        f'{nome_busca} linkedin empresa',
-    ]:
-        for r in serpapi_search(query, num=5):
-            link = r.get("link", "")
-            if "linkedin.com/company" not in link:
-                continue
-            if tokens:
-                if any(t in link.lower() for t in tokens):
-                    return link
-            else:
-                # Siglas (GPS, etc): valida por contexto
-                contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
-                palavras = [w for w in limpar_texto(nome_busca).lower().split() if len(w) > 2]
-                if any(p in contexto for p in palavras):
-                    return link
+    # Tenta por nome primeiro
+    resultados = serpapi_search(f'"{nome_busca}" site:linkedin.com/company', num=10)
 
-    # Fallback CNPJ
-    for r in serpapi_search(f"{cnpj_limpo} site:linkedin.com/company", num=3):
+    for r in resultados:
+        link = r.get("link", "")
+        if "linkedin.com/company" not in link:
+            continue
+        if tokens:
+            if any(t in link.lower() for t in tokens):
+                return link
+        else:
+            # Siglas curtas: valida por contexto
+            contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
+            palavras = [w for w in limpar_texto(nome_busca).lower().split() if len(w) > 2]
+            if any(p in contexto for p in palavras):
+                return link
+
+    # Se não achou, tenta por CNPJ no mesmo batch de resultados (já vieram 10)
+    # Faz 1 call adicional só se necessário
+    for r in serpapi_search(f"{cnpj_limpo} site:linkedin.com/company", num=5):
         link = r.get("link", "")
         if "linkedin.com/company" in link:
             return link
@@ -293,40 +272,43 @@ def buscar_linkedin_empresa(nome_busca, cnpj):
 
 
 # ---------------------------------------------------------------------------
-# LinkedIn de pessoas (QSA)
+# CALL 2 — LinkedIn pessoa #1 do QSA (1 crédito SerpAPI)
 # ---------------------------------------------------------------------------
 
-def buscar_linkedin_pessoa(nome_completo, nome_busca, dominio_oficial=""):
-    partes     = limpar_texto(nome_completo).lower().split()
-    primeiro   = partes[0] if partes else ""
-    ultimo     = partes[-1] if len(partes) > 1 else ""
-    nome_curto = f"{partes[0].title()} {partes[-1].title()}" if len(partes) > 1 else nome_completo
-    nome_busca_simples = nome_simples(nome_busca)
+def buscar_linkedin_pessoa_principal(pessoa, nome_busca, site_empresa=""):
+    """
+    Usa exatamente 1 call SerpAPI.
+    Busca com nome curto (primeiro + último) para maximizar chance de acerto.
+    """
+    nome_completo = pessoa["nome"]
+    partes        = limpar_texto(nome_completo).lower().split()
+    primeiro      = partes[0] if partes else ""
+    ultimo        = partes[-1] if len(partes) > 1 else ""
+    nome_curto    = f"{partes[0].title()} {partes[-1].title()}" if len(partes) > 1 else nome_completo
+    nome_simples_busca = nome_simples(nome_busca)
 
-    # Hint de domínio para subsidiárias (diretoria.rip@kaefer.com → "kaefer")
-    hint_dominio = ""
-    if dominio_oficial:
-        raiz = dominio_oficial.lower().replace("www.", "").split(".")[0]
-        if len(raiz) > 3 and raiz not in nome_busca_simples.lower():
-            hint_dominio = raiz
+    # Hint de subsidiária: kaefer.com → "kaefer"
+    hint = ""
+    if site_empresa:
+        raiz = site_empresa.lower().replace("www.", "").split(".")[0]
+        if len(raiz) > 3 and raiz not in nome_simples_busca.lower():
+            hint = raiz
 
-    queries = [
-        f'"{nome_completo}" "{nome_busca}" site:linkedin.com/in',
-        f'"{nome_curto}" "{nome_busca}" site:linkedin.com/in',
-        f'"{nome_curto}" "{nome_busca_simples}" linkedin',
-    ]
-    if hint_dominio:
-        queries.append(f'"{nome_curto}" "{hint_dominio}" site:linkedin.com/in')
+    # Query composta: nome curto + empresa + hint (tudo num único call)
+    empresa_query = hint if hint else nome_busca
+    query = f'"{nome_curto}" "{empresa_query}" site:linkedin.com/in'
 
-    for query in queries:
-        for r in serpapi_search(query, num=5):
-            link = r.get("link", "")
-            if "linkedin.com/in" not in link:
-                continue
-            contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
-            if primeiro in contexto or ultimo in contexto:
-                return link
+    resultados = serpapi_search(query, num=10)
 
+    for r in resultados:
+        link = r.get("link", "")
+        if "linkedin.com/in" not in link:
+            continue
+        contexto = (r.get("title", "") + " " + r.get("snippet", "")).lower()
+        if primeiro in contexto or ultimo in contexto:
+            return link
+
+    # Sem segundo call — retorna vazio para economizar crédito
     return ""
 
 
@@ -351,47 +333,51 @@ async def processar_csv(file: UploadFile = File(...)):
         empresa = str(row.get("empresa", "")).strip()
         cnpj    = str(row.get("cnpj", "")).strip()
 
-        # CAMADA 0: BrasilAPI
+        # GRÁTIS: BrasilAPI
         telefone, nome_fantasia, email_empresa, uf, pessoas_qsa = buscar_dados_cnpj(cnpj)
         nome_busca = nome_para_busca(nome_fantasia, empresa)
 
-        # CAMADA 1: Site
-        site_empresa = resolver_dominio(nome_busca, cnpj, email_empresa)
+        # GRÁTIS: site via email da BrasilAPI
+        site_empresa = resolver_site_gratis(email_empresa)
 
-        # CAMADA 2: LinkedIn empresa
+        # CALL 1 (1 crédito): LinkedIn empresa
         linkedin_empresa = buscar_linkedin_empresa(nome_busca, cnpj)
 
-        # CAMADA 3: LinkedIn de até 3 pessoas do QSA
-        pessoas_resultado = []
-        for pessoa in pessoas_qsa[:3]:
-            linkedin_p = buscar_linkedin_pessoa(
-                pessoa["nome"], nome_busca, site_empresa
+        # CALL 2 (1 crédito): LinkedIn pessoa #1 do QSA
+        pessoa1_linkedin = ""
+        if pessoas_qsa:
+            pessoa1_linkedin = buscar_linkedin_pessoa_principal(
+                pessoas_qsa[0], nome_busca, site_empresa
             )
-            pessoas_resultado.append({
-                "nome":     pessoa["nome"],
-                "cargo":    pessoa["qualificacao"],
-                "linkedin": linkedin_p,
-            })
 
-        # Garante sempre 3 slots
-        while len(pessoas_resultado) < 3:
-            pessoas_resultado.append({"nome": "", "cargo": "", "linkedin": ""})
+        # Pessoas #2 e #3: nome + cargo do QSA (grátis), sem LinkedIn
+        def slot(idx):
+            if idx < len(pessoas_qsa):
+                return pessoas_qsa[idx]["nome"], pessoas_qsa[idx]["qualificacao"]
+            return "", ""
 
-        resultado = {
-            "empresa":          empresa,
-            "nome_fantasia":    nome_fantasia,
-            "cnpj":             cnpj,
-            "uf":               uf,
-            "telefone":         telefone,
-            "site_empresa":     site_empresa,
-            "linkedin_empresa": linkedin_empresa,
-        }
-        for i, p in enumerate(pessoas_resultado[:3], start=1):
-            resultado[f"pessoa{i}_nome"]     = p["nome"]
-            resultado[f"pessoa{i}_cargo"]    = p["cargo"]
-            resultado[f"pessoa{i}_linkedin"] = p["linkedin"]
+        p1_nome, p1_cargo = slot(0)
+        p2_nome, p2_cargo = slot(1)
+        p3_nome, p3_cargo = slot(2)
 
-        resultados.append(resultado)
+        resultados.append({
+            "empresa":           empresa,
+            "nome_fantasia":     nome_fantasia,
+            "cnpj":              cnpj,
+            "uf":                uf,
+            "telefone":          telefone,
+            "site_empresa":      site_empresa,
+            "linkedin_empresa":  linkedin_empresa,
+            "pessoa1_nome":      p1_nome,
+            "pessoa1_cargo":     p1_cargo,
+            "pessoa1_linkedin":  pessoa1_linkedin,
+            "pessoa2_nome":      p2_nome,
+            "pessoa2_cargo":     p2_cargo,
+            "pessoa2_linkedin":  "",          # reservado — preencher com créditos extras
+            "pessoa3_nome":      p3_nome,
+            "pessoa3_cargo":     p3_cargo,
+            "pessoa3_linkedin":  "",          # reservado — preencher com créditos extras
+        })
 
     df_final = pd.DataFrame(resultados)
     output   = io.StringIO()
